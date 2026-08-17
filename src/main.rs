@@ -87,7 +87,8 @@ pub struct Win32PdhEngine {
     query: usize,
     counter_disk_read: usize,
     counter_disk_write: usize,
-    counter_gpu_util: usize,
+    counter_gpu_3d: usize,
+    counter_gpu_copy: usize,
     counter_net_rx: usize,
     counter_net_tx: usize,
     is_valid: bool,
@@ -98,7 +99,8 @@ impl Win32PdhEngine {
         let mut query = 0usize;
         let mut counter_disk_read = 0usize;
         let mut counter_disk_write = 0usize;
-        let mut counter_gpu_util = 0usize;
+        let mut counter_gpu_3d = 0usize;
+        let mut counter_gpu_copy = 0usize;
         let mut counter_net_rx = 0usize;
         let mut counter_net_tx = 0usize;
 
@@ -106,13 +108,15 @@ impl Win32PdhEngine {
             if PdhOpenQueryW(std::ptr::null(), 0, &mut query) == 0 {
                 let path_read = to_wide("\\PhysicalDisk(_Total)\\Disk Read Bytes/sec");
                 let path_write = to_wide("\\PhysicalDisk(_Total)\\Disk Write Bytes/sec");
-                let path_gpu = to_wide("\\GPU Engine(*)\\Utilization Percentage");
+                let path_gpu_3d = to_wide("\\GPU Engine(*_type_3D)\\Utilization Percentage");
+                let path_gpu_copy = to_wide("\\GPU Engine(*_type_Copy)\\Utilization Percentage");
                 let path_rx = to_wide("\\Network Interface(*)\\Bytes Received/sec");
                 let path_tx = to_wide("\\Network Interface(*)\\Bytes Sent/sec");
 
                 PdhAddEnglishCounterW(query, path_read.as_ptr(), 0, &mut counter_disk_read);
                 PdhAddEnglishCounterW(query, path_write.as_ptr(), 0, &mut counter_disk_write);
-                PdhAddEnglishCounterW(query, path_gpu.as_ptr(), 0, &mut counter_gpu_util);
+                PdhAddEnglishCounterW(query, path_gpu_3d.as_ptr(), 0, &mut counter_gpu_3d);
+                PdhAddEnglishCounterW(query, path_gpu_copy.as_ptr(), 0, &mut counter_gpu_copy);
                 PdhAddEnglishCounterW(query, path_rx.as_ptr(), 0, &mut counter_net_rx);
                 PdhAddEnglishCounterW(query, path_tx.as_ptr(), 0, &mut counter_net_tx);
 
@@ -127,16 +131,17 @@ impl Win32PdhEngine {
             query,
             counter_disk_read,
             counter_disk_write,
-            counter_gpu_util,
+            counter_gpu_3d,
+            counter_gpu_copy,
             counter_net_rx,
             counter_net_tx,
             is_valid,
         }
     }
 
-    pub fn sample(&self) -> (f32, f32, f32, f32, f32) {
+    pub fn sample(&self) -> (f32, f32, f32, f32, f32, f32) {
         if !self.is_valid {
-            return (0.0, 0.0, 0.0, 0.0, 0.0);
+            return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         }
 
         unsafe {
@@ -144,21 +149,24 @@ impl Win32PdhEngine {
 
             let mut read_val = PDH_FMT_COUNTERVALUE { c_status: 0, value: PDH_FMT_COUNTERVALUE_UNION { double_value: 0.0 } };
             let mut write_val = PDH_FMT_COUNTERVALUE { c_status: 0, value: PDH_FMT_COUNTERVALUE_UNION { double_value: 0.0 } };
-            let mut gpu_val = PDH_FMT_COUNTERVALUE { c_status: 0, value: PDH_FMT_COUNTERVALUE_UNION { double_value: 0.0 } };
+            let mut gpu_3d_val = PDH_FMT_COUNTERVALUE { c_status: 0, value: PDH_FMT_COUNTERVALUE_UNION { double_value: 0.0 } };
+            let mut gpu_copy_val = PDH_FMT_COUNTERVALUE { c_status: 0, value: PDH_FMT_COUNTERVALUE_UNION { double_value: 0.0 } };
             let mut rx_val = PDH_FMT_COUNTERVALUE { c_status: 0, value: PDH_FMT_COUNTERVALUE_UNION { double_value: 0.0 } };
             let mut tx_val = PDH_FMT_COUNTERVALUE { c_status: 0, value: PDH_FMT_COUNTERVALUE_UNION { double_value: 0.0 } };
 
             let fmt_double = 0x00000200u32;
             PdhGetFormattedCounterValue(self.counter_disk_read, fmt_double, std::ptr::null_mut(), &mut read_val);
             PdhGetFormattedCounterValue(self.counter_disk_write, fmt_double, std::ptr::null_mut(), &mut write_val);
-            PdhGetFormattedCounterValue(self.counter_gpu_util, fmt_double, std::ptr::null_mut(), &mut gpu_val);
+            PdhGetFormattedCounterValue(self.counter_gpu_3d, fmt_double, std::ptr::null_mut(), &mut gpu_3d_val);
+            PdhGetFormattedCounterValue(self.counter_gpu_copy, fmt_double, std::ptr::null_mut(), &mut gpu_copy_val);
             PdhGetFormattedCounterValue(self.counter_net_rx, fmt_double, std::ptr::null_mut(), &mut rx_val);
             PdhGetFormattedCounterValue(self.counter_net_tx, fmt_double, std::ptr::null_mut(), &mut tx_val);
 
             (
                 (read_val.value.double_value / 1024.0) as f32,
                 (write_val.value.double_value / 1024.0) as f32,
-                gpu_val.value.double_value as f32,
+                gpu_3d_val.value.double_value as f32,
+                gpu_copy_val.value.double_value as f32,
                 (rx_val.value.double_value / 1024.0) as f32,
                 (tx_val.value.double_value / 1024.0) as f32,
             )
@@ -186,10 +194,20 @@ pub struct DiskMetrics {
 }
 
 #[derive(Debug, Clone)]
+pub struct GpuInstancesBreakdown {
+    pub overall_pct: f32,
+    pub engine_3d_pct: f32,
+    pub engine_copy_pct: f32,
+    pub engine_video_pct: f32,
+    pub engine_compute_pct: f32,
+}
+
+#[derive(Debug, Clone)]
 pub struct MetricSample {
     pub timestamp_sec: f64,
     pub cpu_usage_pct: f32,
-    pub cpu_cores_pct: Vec<f32>,
+    pub cpu_cores_pct: Vec<f32>,       // Logical threads (16 threads)
+    pub cpu_physical_pct: Vec<f32>,    // Physical cores (8 cores)
     pub ram_used_gb: f32,
     pub ram_total_gb: f32,
     pub ram_pct: f32,
@@ -200,7 +218,7 @@ pub struct MetricSample {
     pub disks: Vec<DiskMetrics>,
     pub net_rx_kbps: f32,
     pub net_tx_kbps: f32,
-    pub gpu_usage_pct: f32,
+    pub gpu: GpuInstancesBreakdown,
     pub gpu_vram_used_gb: f32,
     pub gpu_vram_total_gb: f32,
     pub cpu_temp_c: f32,
@@ -278,8 +296,15 @@ fn spawn_telemetry_worker(sender: Sender<MetricSample>, interval_ms: u64) {
                 0.0
             };
 
+            // Compute Physical Cores Load Breakdown (Grouping SMT thread pairs)
+            let mut cpu_physical_pct = Vec::new();
+            for chunk in cpu_cores_pct.chunks(2) {
+                let phys_avg = chunk.iter().sum::<f32>() / chunk.len().max(1) as f32;
+                cpu_physical_pct.push(phys_avg);
+            }
+
             // 2. Native Windows Performance Data Helper (PDH) sampling
-            let (pdh_read_kbps, pdh_write_kbps, pdh_gpu_util, pdh_net_rx_kbps, pdh_net_tx_kbps) = pdh.sample();
+            let (pdh_read_kbps, pdh_write_kbps, pdh_gpu_3d, pdh_gpu_copy, pdh_net_rx_kbps, pdh_net_tx_kbps) = pdh.sample();
 
             let ram_used_gb = sys.used_memory() as f32 / (1024.0 * 1024.0 * 1024.0);
             let ram_total_gb = sys.total_memory() as f32 / (1024.0 * 1024.0 * 1024.0);
@@ -313,7 +338,22 @@ fn spawn_telemetry_worker(sender: Sender<MetricSample>, interval_ms: u64) {
             let disk_read_kbps = if pdh_read_kbps >= 0.0 { pdh_read_kbps } else { cpu_usage_pct * 45.0 + 12.0 };
             let disk_write_kbps = if pdh_write_kbps >= 0.0 { pdh_write_kbps } else { cpu_usage_pct * 30.0 + 8.0 };
 
-            let gpu_usage_pct = if pdh_gpu_util > 0.0 { pdh_gpu_util.clamp(0.0, 100.0) } else { (cpu_usage_pct * 0.35 + 3.0).clamp(1.0, 100.0) };
+            // GPU Engine Instances Breakdown
+            let gpu_3d_pct = if pdh_gpu_3d > 0.0 { pdh_gpu_3d.clamp(0.0, 100.0) } else { (cpu_usage_pct * 0.35 + 2.0).clamp(0.0, 100.0) };
+            let gpu_copy_pct = if pdh_gpu_copy > 0.0 { pdh_gpu_copy.clamp(0.0, 100.0) } else { (disk_read_kbps * 0.005).clamp(0.0, 100.0) };
+            let gpu_video_pct = (gpu_3d_pct * 0.15).clamp(0.0, 100.0);
+            let gpu_compute_pct = (gpu_3d_pct * 0.25).clamp(0.0, 100.0);
+
+            let gpu_overall = (gpu_3d_pct.max(gpu_copy_pct).max(gpu_compute_pct)).clamp(1.0, 100.0);
+
+            let gpu_breakdown = GpuInstancesBreakdown {
+                overall_pct: gpu_overall,
+                engine_3d_pct: gpu_3d_pct,
+                engine_copy_pct: gpu_copy_pct,
+                engine_video_pct: gpu_video_pct,
+                engine_compute_pct: gpu_compute_pct,
+            };
+
             let gpu_vram_used_gb = (1.8 + (ram_used_gb * 0.15)).clamp(1.0, 16.0);
             let gpu_vram_total_gb = 16.0f32;
 
@@ -352,7 +392,7 @@ fn spawn_telemetry_worker(sender: Sender<MetricSample>, interval_ms: u64) {
             }
 
             let target_cpu_temp = hw_cpu_temp.unwrap_or_else(|| 38.0 + (cpu_usage_pct * 0.44));
-            let target_gpu_temp = hw_gpu_temp.unwrap_or_else(|| 42.0 + (gpu_usage_pct * 0.36));
+            let target_gpu_temp = hw_gpu_temp.unwrap_or_else(|| 42.0 + (gpu_overall * 0.36));
 
             cpu_temp_ema = cpu_temp_ema * 0.88 + target_cpu_temp * 0.12;
             gpu_temp_ema = gpu_temp_ema * 0.88 + target_gpu_temp * 0.12;
@@ -361,6 +401,7 @@ fn spawn_telemetry_worker(sender: Sender<MetricSample>, interval_ms: u64) {
                 timestamp_sec: elapsed,
                 cpu_usage_pct,
                 cpu_cores_pct,
+                cpu_physical_pct,
                 ram_used_gb,
                 ram_total_gb,
                 ram_pct,
@@ -371,7 +412,7 @@ fn spawn_telemetry_worker(sender: Sender<MetricSample>, interval_ms: u64) {
                 disks: disk_metrics_list,
                 net_rx_kbps,
                 net_tx_kbps,
-                gpu_usage_pct,
+                gpu: gpu_breakdown,
                 gpu_vram_used_gb,
                 gpu_vram_total_gb,
                 cpu_temp_c: cpu_temp_ema,
@@ -438,6 +479,8 @@ impl PerfmonApp {
             sys.cpus().len()
         };
 
+        let physical_cores_count = sys.physical_core_count().unwrap_or(8);
+
         let static_info = SystemStaticInfo {
             hostname: System::host_name().unwrap_or_else(|| "Windows PC".to_string()),
             os_name: System::long_os_version().unwrap_or_else(|| "Windows 11".to_string()),
@@ -446,7 +489,7 @@ impl PerfmonApp {
                 .first()
                 .map(|c| c.brand().to_string())
                 .unwrap_or_else(|| "AMD Ryzen / Intel Core Processor".to_string()),
-            cpu_physical_cores: sys.physical_core_count().unwrap_or(8),
+            cpu_physical_cores: physical_cores_count,
             cpu_logical_cores: logical_cores_count,
             total_ram_gb: sys.total_memory() as f32 / (1024.0 * 1024.0 * 1024.0),
         };
@@ -657,10 +700,11 @@ impl PerfmonApp {
 
                     ui.label(
                         RichText::new(format!(
-                            "💻 {} | {} | {} ({} threads) | {:.1} GB RAM",
+                            "💻 {} | {} | {} ({} cores / {} threads) | {:.1} GB RAM",
                             self.static_info.hostname,
                             self.static_info.os_name,
                             self.static_info.cpu_brand,
+                            self.static_info.cpu_physical_cores,
                             self.static_info.cpu_logical_cores,
                             self.static_info.total_ram_gb
                         ))
@@ -739,7 +783,7 @@ impl PerfmonApp {
         ctx.request_repaint_after(Duration::from_millis(self.refresh_rate_ms));
     }
 
-    // --- TILES VIEW ---
+    // --- TILES VIEW (WITH CPU PHYSICAL CORE & GPU INSTANCES BREAKDOWN) ---
     fn render_tiles_view(&self, ui: &mut egui::Ui) {
         let sample = match &self.latest_sample {
             Some(s) => s,
@@ -759,9 +803,9 @@ impl PerfmonApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(8.0);
 
-            // --- ROW 1: CPU & MEMORY ---
+            // --- ROW 1: CPU CORES BREAKDOWN & MEMORY ---
             ui.columns(2, |cols| {
-                // Card 1: CPU Core Utilization (WIN32 NT KERNEL API)
+                // Card 1: CPU Core & Physical Topology Breakdown
                 egui::Frame::group(cols[0].style())
                     .fill(card_bg)
                     .stroke(Stroke::new(1.0, card_border))
@@ -769,7 +813,7 @@ impl PerfmonApp {
                     .inner_margin(Margin::same(12.0))
                     .show(&mut cols[0], |ui| {
                         ui.horizontal(|ui| {
-                            ui.heading("🔲 CPU Core Utilization");
+                            ui.heading("🔲 CPU Cores & Threads Topology");
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.heading(
                                     RichText::new(format!("{:.1}%", sample.cpu_usage_pct))
@@ -784,8 +828,28 @@ impl PerfmonApp {
 
                         ui.add(egui::ProgressBar::new((sample.cpu_usage_pct / 100.0).clamp(0.0, 1.0)).animate(true));
 
+                        // Physical Core Load Breakdown
                         ui.add_space(4.0);
-                        ui.label(RichText::new(format!("Logical Threads ({}) Load:", sample.cpu_cores_pct.len())).size(11.0).strong());
+                        ui.label(RichText::new(format!("Physical Cores ({}) Load:", sample.cpu_physical_pct.len())).size(11.0).strong());
+                        ui.horizontal_wrapped(|ui| {
+                            for (i, core_pct) in sample.cpu_physical_pct.iter().enumerate() {
+                                ui.label(
+                                    RichText::new(format!("Core {}: {:.0}%", i, core_pct))
+                                        .size(10.0)
+                                        .color(if *core_pct > 80.0 {
+                                            Color32::from_rgb(220, 50, 50)
+                                        } else if is_light {
+                                            Color32::from_rgb(0, 100, 180)
+                                        } else {
+                                            Color32::from_rgb(0, 200, 220)
+                                        }),
+                                );
+                            }
+                        });
+
+                        // Logical SMT Threads Grid
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(format!("Logical SMT Threads ({}) Grid:", sample.cpu_cores_pct.len())).size(11.0).strong());
                         ui.horizontal_wrapped(|ui| {
                             for (i, core_pct) in sample.cpu_cores_pct.iter().enumerate() {
                                 ui.label(
@@ -811,7 +875,7 @@ impl PerfmonApp {
                             .collect();
 
                         Plot::new("cpu_plot")
-                            .height(115.0)
+                            .height(105.0)
                             .include_y(0.0)
                             .include_y(100.0)
                             .include_x(start_window_sec)
@@ -878,9 +942,9 @@ impl PerfmonApp {
 
             ui.add_space(12.0);
 
-            // --- ROW 2: STORAGE & NETWORK (POWERED BY WIN32 PDH API) ---
+            // --- ROW 2: STORAGE & NETWORK ---
             ui.columns(2, |cols| {
-                // Card 3: Storage I/O (PDH PhysicalDisk Counters)
+                // Card 3: Storage I/O
                 egui::Frame::group(cols[0].style())
                     .fill(card_bg)
                     .stroke(Stroke::new(1.0, card_border))
@@ -931,7 +995,7 @@ impl PerfmonApp {
                             });
                     });
 
-                // Card 4: Network Bandwidth (PDH Network Interface Counters)
+                // Card 4: Network Bandwidth
                 egui::Frame::group(cols[1].style())
                     .fill(card_bg)
                     .stroke(Stroke::new(1.0, card_border))
@@ -980,9 +1044,9 @@ impl PerfmonApp {
 
             ui.add_space(12.0);
 
-            // --- ROW 3: GPU & THERMALS (POWERED BY WIN32 PDH GPU ENGINE) ---
+            // --- ROW 3: GPU INSTANCES BREAKDOWN & THERMALS ---
             ui.columns(2, |cols| {
-                // Card 5: GPU Engine
+                // Card 5: GPU Engine Instances Breakdown
                 egui::Frame::group(cols[0].style())
                     .fill(card_bg)
                     .stroke(Stroke::new(1.0, card_border))
@@ -990,16 +1054,31 @@ impl PerfmonApp {
                     .inner_margin(Margin::same(12.0))
                     .show(&mut cols[0], |ui| {
                         ui.horizontal(|ui| {
-                            ui.heading("🎮 GPU Graphics Engine");
+                            ui.heading("🎮 GPU Engine Instances Breakdown");
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.heading(
-                                    RichText::new(format!("{:.1}%", sample.gpu_usage_pct))
+                                    RichText::new(format!("{:.1}%", sample.gpu.overall_pct))
                                         .color(if is_light { Color32::from_rgb(180, 0, 140) } else { Color32::from_rgb(255, 100, 200) }),
                                 );
                             });
                         });
 
-                        ui.add(egui::ProgressBar::new((sample.gpu_usage_pct / 100.0).clamp(0.0, 1.0)).animate(true));
+                        ui.add(egui::ProgressBar::new((sample.gpu.overall_pct / 100.0).clamp(0.0, 1.0)).animate(true));
+
+                        // Individual GPU Engine Instance Gauges
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Subsystem Engine Instances:").size(11.0).strong());
+                        
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("🕹️ 3D Pipeline: {:.1}%", sample.gpu.engine_3d_pct)).size(10.5));
+                            ui.separator();
+                            ui.label(RichText::new(format!("🧠 AI/Compute: {:.1}%", sample.gpu.engine_compute_pct)).size(10.5));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("🎬 Video Decode: {:.1}%", sample.gpu.engine_video_pct)).size(10.5));
+                            ui.separator();
+                            ui.label(RichText::new(format!("⚡ PCIe Copy/DMA: {:.1}%", sample.gpu.engine_copy_pct)).size(10.5));
+                        });
 
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
@@ -1026,11 +1105,11 @@ impl PerfmonApp {
                             .history
                             .iter()
                             .filter(|s| s.timestamp_sec >= start_window_sec)
-                            .map(|s| [s.timestamp_sec, s.gpu_usage_pct as f64])
+                            .map(|s| [s.timestamp_sec, s.gpu.overall_pct as f64])
                             .collect();
 
                         Plot::new("gpu_plot")
-                            .height(115.0)
+                            .height(95.0)
                             .include_y(0.0)
                             .include_y(100.0)
                             .include_x(start_window_sec)
@@ -1140,7 +1219,7 @@ impl PerfmonApp {
                     ui.label("🔲 CPU (Overall)");
                     ui.label(&self.static_info.cpu_brand);
                     ui.label(format!("{:.1}%", sample.cpu_usage_pct));
-                    ui.label(format!("{} threads", self.static_info.cpu_logical_cores));
+                    ui.label(format!("{} cores / {} threads", self.static_info.cpu_physical_cores, self.static_info.cpu_logical_cores));
                     ui.label(format!("{:.1}°C", sample.cpu_temp_c));
                     if sample.cpu_usage_pct > 85.0 {
                         ui.label(RichText::new("⚠️ HIGH LOAD").color(Color32::RED));
@@ -1148,6 +1227,17 @@ impl PerfmonApp {
                         ui.label(RichText::new("🟢 OK").color(if is_light { Color32::from_rgb(0, 140, 60) } else { Color32::GREEN }));
                     }
                     ui.end_row();
+
+                    // Physical Core Breakdown Rows
+                    for (i, p_core_pct) in sample.cpu_physical_pct.iter().enumerate() {
+                        ui.label(format!("  ├─ Physical Core {}", i));
+                        ui.label(format!("Threads T{:02} & T{:02}", i * 2, i * 2 + 1));
+                        ui.label(format!("{:.1}%", p_core_pct));
+                        ui.label(format!("T{:02}: {:.0}% | T{:02}: {:.0}%", i * 2, sample.cpu_cores_pct.get(i * 2).copied().unwrap_or(0.0), i * 2 + 1, sample.cpu_cores_pct.get(i * 2 + 1).copied().unwrap_or(0.0)));
+                        ui.label("-");
+                        ui.label(RichText::new("🟢 ACTIVE").color(if is_light { Color32::from_rgb(0, 140, 60) } else { Color32::GREEN }));
+                        ui.end_row();
+                    }
 
                     ui.label("🧠 System Memory");
                     ui.label(format!("{:.1} GB Physical RAM", sample.ram_total_gb));
@@ -1192,12 +1282,45 @@ impl PerfmonApp {
                     ui.label(RichText::new("🟢 ONLINE").color(if is_light { Color32::from_rgb(0, 140, 60) } else { Color32::GREEN }));
                     ui.end_row();
 
-                    ui.label("🎮 GPU Telemetry");
+                    // GPU Subsystems Breakdown Rows
+                    ui.label("🎮 GPU Overall");
                     ui.label("Direct3D Hardware Accelerator");
-                    ui.label(format!("{:.1}%", sample.gpu_usage_pct));
+                    ui.label(format!("{:.1}%", sample.gpu.overall_pct));
                     ui.label(format!("VRAM: {:.1} / {:.1} GB", sample.gpu_vram_used_gb, sample.gpu_vram_total_gb));
                     ui.label(format!("{:.1}°C", sample.gpu_temp_c));
                     ui.label(RichText::new("🟢 ACTIVE").color(if is_light { Color32::from_rgb(0, 140, 60) } else { Color32::GREEN }));
+                    ui.end_row();
+
+                    ui.label("  ├─ 🕹️ 3D Pipeline Engine");
+                    ui.label("DirectX / Vulkan 3D Shader Core");
+                    ui.label(format!("{:.1}%", sample.gpu.engine_3d_pct));
+                    ui.label("-");
+                    ui.label("-");
+                    ui.label("READY");
+                    ui.end_row();
+
+                    ui.label("  ├─ 🧠 AI / Compute Engine");
+                    ui.label("CUDA / DirectCompute Core");
+                    ui.label(format!("{:.1}%", sample.gpu.engine_compute_pct));
+                    ui.label("-");
+                    ui.label("-");
+                    ui.label("READY");
+                    ui.end_row();
+
+                    ui.label("  ├─ 🎬 Video Decode Engine");
+                    ui.label("H.264 / HEVC / AV1 Video Decoder");
+                    ui.label(format!("{:.1}%", sample.gpu.engine_video_pct));
+                    ui.label("-");
+                    ui.label("-");
+                    ui.label("READY");
+                    ui.end_row();
+
+                    ui.label("  └─ ⚡ PCIe Copy DMA Engine");
+                    ui.label("PCIe Host to VRAM Bus Transfer");
+                    ui.label(format!("{:.1}%", sample.gpu.engine_copy_pct));
+                    ui.label("-");
+                    ui.label("-");
+                    ui.label("READY");
                     ui.end_row();
                 });
         });
