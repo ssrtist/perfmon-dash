@@ -1,0 +1,13 @@
+[package]
+name = "perfmon-dash"
+version = "1.0.0"
+edition = "2021"
+authors = ["Kenny <kenny@antigravity>"]
+description = "Native Windows System Performance Telemetry Dashboard"
+
+[dependencies]
+eframe = "0.29"
+egui_plot = "0.29"
+sysinfo = "0.31"
+chrono = "0.4"
+crossbeam-channel = "0.5"
