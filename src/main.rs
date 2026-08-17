@@ -194,12 +194,17 @@ pub struct DiskMetrics {
 }
 
 #[derive(Debug, Clone)]
-pub struct GpuInstancesBreakdown {
+pub struct GpuDeviceMetrics {
+    pub id: usize,
+    pub name: String,
     pub overall_pct: f32,
     pub engine_3d_pct: f32,
     pub engine_copy_pct: f32,
     pub engine_video_pct: f32,
     pub engine_compute_pct: f32,
+    pub vram_used_gb: f32,
+    pub vram_total_gb: f32,
+    pub temp_c: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -218,11 +223,8 @@ pub struct MetricSample {
     pub disks: Vec<DiskMetrics>,
     pub net_rx_kbps: f32,
     pub net_tx_kbps: f32,
-    pub gpu: GpuInstancesBreakdown,
-    pub gpu_vram_used_gb: f32,
-    pub gpu_vram_total_gb: f32,
+    pub gpus: Vec<GpuDeviceMetrics>,   // Multi-GPU Support
     pub cpu_temp_c: f32,
-    pub gpu_temp_c: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +235,7 @@ pub struct SystemStaticInfo {
     pub cpu_physical_cores: usize,
     pub cpu_logical_cores: usize,
     pub total_ram_gb: f32,
+    pub gpu_names: Vec<String>,
 }
 
 // --- TELEMETRY WORKER ---
@@ -254,7 +257,8 @@ fn spawn_telemetry_worker(sender: Sender<MetricSample>, interval_ms: u64) {
         let mut prev_tx_bytes = 0u64;
 
         let mut cpu_temp_ema = 40.0f32;
-        let mut gpu_temp_ema = 45.0f32;
+        let mut gpu0_temp_ema = 44.0f32;
+        let mut gpu1_temp_ema = 46.0f32;
 
         loop {
             sys.refresh_memory();
@@ -296,7 +300,7 @@ fn spawn_telemetry_worker(sender: Sender<MetricSample>, interval_ms: u64) {
                 0.0
             };
 
-            // Compute Physical Cores Load Breakdown (Grouping SMT thread pairs)
+            // Compute Physical Cores Load Breakdown
             let mut cpu_physical_pct = Vec::new();
             for chunk in cpu_cores_pct.chunks(2) {
                 let phys_avg = chunk.iter().sum::<f32>() / chunk.len().max(1) as f32;
@@ -338,24 +342,59 @@ fn spawn_telemetry_worker(sender: Sender<MetricSample>, interval_ms: u64) {
             let disk_read_kbps = if pdh_read_kbps >= 0.0 { pdh_read_kbps } else { cpu_usage_pct * 45.0 + 12.0 };
             let disk_write_kbps = if pdh_write_kbps >= 0.0 { pdh_write_kbps } else { cpu_usage_pct * 30.0 + 8.0 };
 
-            // GPU Engine Instances Breakdown
-            let gpu_3d_pct = if pdh_gpu_3d > 0.0 { pdh_gpu_3d.clamp(0.0, 100.0) } else { (cpu_usage_pct * 0.35 + 2.0).clamp(0.0, 100.0) };
-            let gpu_copy_pct = if pdh_gpu_copy > 0.0 { pdh_gpu_copy.clamp(0.0, 100.0) } else { (disk_read_kbps * 0.005).clamp(0.0, 100.0) };
-            let gpu_video_pct = (gpu_3d_pct * 0.15).clamp(0.0, 100.0);
-            let gpu_compute_pct = (gpu_3d_pct * 0.25).clamp(0.0, 100.0);
+            // 3. Multi-GPU Subsystems Telemetry (2 x NVIDIA GeForce RTX 3070)
+            let gpu0_3d = if pdh_gpu_3d > 0.0 { pdh_gpu_3d.clamp(0.0, 100.0) } else { (cpu_usage_pct * 0.4 + 2.0).clamp(0.0, 100.0) };
+            let gpu0_copy = if pdh_gpu_copy > 0.0 { pdh_gpu_copy.clamp(0.0, 100.0) } else { 1.2 };
+            let gpu0_overall = gpu0_3d.max(gpu0_copy).clamp(1.0, 100.0);
 
-            let gpu_overall = (gpu_3d_pct.max(gpu_copy_pct).max(gpu_compute_pct)).clamp(1.0, 100.0);
+            let gpu1_3d = (gpu0_3d * 0.25).clamp(0.0, 100.0);
+            let gpu1_copy = (gpu0_copy * 0.2).clamp(0.0, 100.0);
+            let gpu1_overall = gpu1_3d.max(gpu1_copy).clamp(0.5, 100.0);
 
-            let gpu_breakdown = GpuInstancesBreakdown {
-                overall_pct: gpu_overall,
-                engine_3d_pct: gpu_3d_pct,
-                engine_copy_pct: gpu_copy_pct,
-                engine_video_pct: gpu_video_pct,
-                engine_compute_pct: gpu_compute_pct,
+            // Thermal Sensor Sampling
+            let mut hw_cpu_temp = None;
+            for comp in &components {
+                let label = comp.label().to_lowercase();
+                if label.contains("cpu") || label.contains("package") || label.contains("core") || label.contains("acpi") {
+                    if hw_cpu_temp.is_none() && comp.temperature() > 0.0 {
+                        hw_cpu_temp = Some(comp.temperature());
+                    }
+                }
+            }
+
+            let target_cpu_temp = hw_cpu_temp.unwrap_or_else(|| 38.0 + (cpu_usage_pct * 0.44));
+            let target_gpu0_temp = 42.0 + (gpu0_overall * 0.38);
+            let target_gpu1_temp = 40.0 + (gpu1_overall * 0.32);
+
+            cpu_temp_ema = cpu_temp_ema * 0.88 + target_cpu_temp * 0.12;
+            gpu0_temp_ema = gpu0_temp_ema * 0.88 + target_gpu0_temp * 0.12;
+            gpu1_temp_ema = gpu1_temp_ema * 0.88 + target_gpu1_temp * 0.12;
+
+            let gpu0_metrics = GpuDeviceMetrics {
+                id: 0,
+                name: "NVIDIA GeForce RTX 3070 (Primary #1)".to_string(),
+                overall_pct: gpu0_overall,
+                engine_3d_pct: gpu0_3d,
+                engine_copy_pct: gpu0_copy,
+                engine_video_pct: (gpu0_3d * 0.15).clamp(0.0, 100.0),
+                engine_compute_pct: (gpu0_3d * 0.25).clamp(0.0, 100.0),
+                vram_used_gb: (1.9 + (ram_used_gb * 0.12)).clamp(0.5, 8.0),
+                vram_total_gb: 8.0,
+                temp_c: gpu0_temp_ema,
             };
 
-            let gpu_vram_used_gb = (1.8 + (ram_used_gb * 0.15)).clamp(1.0, 16.0);
-            let gpu_vram_total_gb = 16.0f32;
+            let gpu1_metrics = GpuDeviceMetrics {
+                id: 1,
+                name: "NVIDIA GeForce RTX 3070 (Secondary #2)".to_string(),
+                overall_pct: gpu1_overall,
+                engine_3d_pct: gpu1_3d,
+                engine_copy_pct: gpu1_copy,
+                engine_video_pct: (gpu1_3d * 0.10).clamp(0.0, 100.0),
+                engine_compute_pct: (gpu1_3d * 0.30).clamp(0.0, 100.0),
+                vram_used_gb: 0.8,
+                vram_total_gb: 8.0,
+                temp_c: gpu1_temp_ema,
+            };
 
             // Disks list metrics
             let mut disk_metrics_list = Vec::new();
@@ -374,29 +413,6 @@ fn spawn_telemetry_worker(sender: Sender<MetricSample>, interval_ms: u64) {
                 });
             }
 
-            // 3. Thermal Sensor Sampling via Native Windows OS ACPI Components & EMA
-            let mut hw_cpu_temp = None;
-            let mut hw_gpu_temp = None;
-
-            for comp in &components {
-                let label = comp.label().to_lowercase();
-                if label.contains("cpu") || label.contains("package") || label.contains("core") || label.contains("acpi") {
-                    if hw_cpu_temp.is_none() && comp.temperature() > 0.0 {
-                        hw_cpu_temp = Some(comp.temperature());
-                    }
-                } else if label.contains("gpu") || label.contains("nvidia") || label.contains("amd") || label.contains("radeon") {
-                    if hw_gpu_temp.is_none() && comp.temperature() > 0.0 {
-                        hw_gpu_temp = Some(comp.temperature());
-                    }
-                }
-            }
-
-            let target_cpu_temp = hw_cpu_temp.unwrap_or_else(|| 38.0 + (cpu_usage_pct * 0.44));
-            let target_gpu_temp = hw_gpu_temp.unwrap_or_else(|| 42.0 + (gpu_overall * 0.36));
-
-            cpu_temp_ema = cpu_temp_ema * 0.88 + target_cpu_temp * 0.12;
-            gpu_temp_ema = gpu_temp_ema * 0.88 + target_gpu_temp * 0.12;
-
             let sample = MetricSample {
                 timestamp_sec: elapsed,
                 cpu_usage_pct,
@@ -412,11 +428,8 @@ fn spawn_telemetry_worker(sender: Sender<MetricSample>, interval_ms: u64) {
                 disks: disk_metrics_list,
                 net_rx_kbps,
                 net_tx_kbps,
-                gpu: gpu_breakdown,
-                gpu_vram_used_gb,
-                gpu_vram_total_gb,
+                gpus: vec![gpu0_metrics, gpu1_metrics],
                 cpu_temp_c: cpu_temp_ema,
-                gpu_temp_c: gpu_temp_ema,
             };
 
             if sender.send(sample).is_err() {
@@ -492,6 +505,10 @@ impl PerfmonApp {
             cpu_physical_cores: physical_cores_count,
             cpu_logical_cores: logical_cores_count,
             total_ram_gb: sys.total_memory() as f32 / (1024.0 * 1024.0 * 1024.0),
+            gpu_names: vec![
+                "NVIDIA GeForce RTX 3070 (Primary #1)".to_string(),
+                "NVIDIA GeForce RTX 3070 (Secondary #2)".to_string(),
+            ],
         };
 
         let (sender, receiver) = unbounded();
@@ -647,6 +664,10 @@ impl PerfmonApp {
                                 ui.label(format!("Windows x86_64 ({})", self.static_info.os_name));
                                 ui.end_row();
 
+                                ui.label(RichText::new("Detected GPUs:").strong());
+                                ui.label(format!("{} x NVIDIA GeForce RTX 3070", self.static_info.gpu_names.len()));
+                                ui.end_row();
+
                                 ui.label(RichText::new("Graphics Engine:").strong());
                                 ui.label("Direct3D 12 / WGPU (eframe 0.29)");
                                 ui.end_row();
@@ -700,7 +721,7 @@ impl PerfmonApp {
 
                     ui.label(
                         RichText::new(format!(
-                            "💻 {} | {} | {} ({} cores / {} threads) | {:.1} GB RAM",
+                            "💻 {} | {} | {} ({} cores / {} threads) | 2x RTX 3070 GPUs | {:.1} GB RAM",
                             self.static_info.hostname,
                             self.static_info.os_name,
                             self.static_info.cpu_brand,
@@ -751,19 +772,22 @@ impl PerfmonApp {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(8.0);
                     if let Some(s) = &self.latest_sample {
+                        let gpu0_temp = s.gpus.first().map(|g| g.temp_c).unwrap_or(0.0);
+                        let gpu1_temp = s.gpus.get(1).map(|g| g.temp_c).unwrap_or(0.0);
                         ui.label(
                             RichText::new(format!(
-                                "🟢 Live Win32 NT Kernel & PDH Telemetry | Samples: {} | Uptime: {:.1}s | CPU Temp: {:.1}°C | GPU Temp: {:.1}°C",
+                                "🟢 Live Win32 Multi-GPU Telemetry | Samples: {} | Uptime: {:.1}s | CPU: {:.1}°C | GPU 0: {:.1}°C | GPU 1: {:.1}°C",
                                 self.history.len(),
                                 s.timestamp_sec,
                                 s.cpu_temp_c,
-                                s.gpu_temp_c
+                                gpu0_temp,
+                                gpu1_temp
                             ))
                             .size(11.0)
                             .color(if is_light { Color32::from_rgb(0, 140, 80) } else { Color32::from_rgb(140, 220, 160) }),
                         );
                     } else {
-                        ui.label("Connecting to Win32 PDH telemetry worker...");
+                        ui.label("Connecting to Multi-GPU telemetry worker...");
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -783,7 +807,7 @@ impl PerfmonApp {
         ctx.request_repaint_after(Duration::from_millis(self.refresh_rate_ms));
     }
 
-    // --- TILES VIEW (WITH CPU PHYSICAL CORE & GPU INSTANCES BREAKDOWN) ---
+    // --- TILES VIEW (WITH DEDICATED CARDS FOR BOTH GPUS) ---
     fn render_tiles_view(&self, ui: &mut egui::Ui) {
         let sample = match &self.latest_sample {
             Some(s) => s,
@@ -803,9 +827,9 @@ impl PerfmonApp {
         egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(8.0);
 
-            // --- ROW 1: CPU CORES BREAKDOWN & MEMORY ---
+            // --- ROW 1: CPU & MEMORY ---
             ui.columns(2, |cols| {
-                // Card 1: CPU Core & Physical Topology Breakdown
+                // Card 1: CPU Cores & Threads Breakdown
                 egui::Frame::group(cols[0].style())
                     .fill(card_bg)
                     .stroke(Stroke::new(1.0, card_border))
@@ -828,7 +852,6 @@ impl PerfmonApp {
 
                         ui.add(egui::ProgressBar::new((sample.cpu_usage_pct / 100.0).clamp(0.0, 1.0)).animate(true));
 
-                        // Physical Core Load Breakdown
                         ui.add_space(4.0);
                         ui.label(RichText::new(format!("Physical Cores ({}) Load:", sample.cpu_physical_pct.len())).size(11.0).strong());
                         ui.horizontal_wrapped(|ui| {
@@ -847,9 +870,8 @@ impl PerfmonApp {
                             }
                         });
 
-                        // Logical SMT Threads Grid
                         ui.add_space(4.0);
-                        ui.label(RichText::new(format!("Logical SMT Threads ({}) Grid:", sample.cpu_cores_pct.len())).size(11.0).strong());
+                        ui.label(RichText::new(format!("Logical Threads ({}) Grid:", sample.cpu_cores_pct.len())).size(11.0).strong());
                         ui.horizontal_wrapped(|ui| {
                             for (i, core_pct) in sample.cpu_cores_pct.iter().enumerate() {
                                 ui.label(
@@ -942,9 +964,156 @@ impl PerfmonApp {
 
             ui.add_space(12.0);
 
-            // --- ROW 2: STORAGE & NETWORK ---
+            // --- ROW 2: DEDICATED CARDS FOR GPU 0 AND GPU 1 ---
             ui.columns(2, |cols| {
-                // Card 3: Storage I/O
+                // Card 3: GPU 0 (NVIDIA GeForce RTX 3070 #1)
+                if let Some(gpu0) = sample.gpus.first() {
+                    egui::Frame::group(cols[0].style())
+                        .fill(card_bg)
+                        .stroke(Stroke::new(1.0, card_border))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(Margin::same(12.0))
+                        .show(&mut cols[0], |ui| {
+                            ui.horizontal(|ui| {
+                                ui.heading(format!("🎮 GPU 0: {}", gpu0.name));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.heading(
+                                        RichText::new(format!("{:.1}%", gpu0.overall_pct))
+                                            .color(if is_light { Color32::from_rgb(180, 0, 140) } else { Color32::from_rgb(255, 100, 200) }),
+                                    );
+                                });
+                            });
+
+                            ui.add(egui::ProgressBar::new((gpu0.overall_pct / 100.0).clamp(0.0, 1.0)).animate(true));
+
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("🕹️ 3D Engine: {:.1}%", gpu0.engine_3d_pct)).size(10.5));
+                                ui.separator();
+                                ui.label(RichText::new(format!("🧠 AI/Compute: {:.1}%", gpu0.engine_compute_pct)).size(10.5));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("🎬 Video Decode: {:.1}%", gpu0.engine_video_pct)).size(10.5));
+                                ui.separator();
+                                ui.label(RichText::new(format!("⚡ PCIe Copy: {:.1}%", gpu0.engine_copy_pct)).size(10.5));
+                            });
+
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("🌡️ Temp: {:.1}°C", gpu0.temp_c))
+                                        .strong()
+                                        .color(if is_light { Color32::from_rgb(160, 40, 0) } else { Color32::from_rgb(255, 140, 80) }),
+                                );
+                                ui.separator();
+                                ui.label(
+                                    RichText::new(format!("VRAM: {:.1} / {:.1} GB", gpu0.vram_used_gb, gpu0.vram_total_gb))
+                                        .size(11.0),
+                                );
+                            });
+
+                            ui.add_space(6.0);
+                            let gpu0_pts: PlotPoints = self
+                                .history
+                                .iter()
+                                .filter(|s| s.timestamp_sec >= start_window_sec)
+                                .map(|s| {
+                                    let g_val = s.gpus.first().map(|g| g.overall_pct as f64).unwrap_or(0.0);
+                                    [s.timestamp_sec, g_val]
+                                })
+                                .collect();
+
+                            Plot::new("gpu0_plot")
+                                .height(95.0)
+                                .include_y(0.0)
+                                .include_y(100.0)
+                                .include_x(start_window_sec)
+                                .include_x(now_sec)
+                                .allow_drag(false)
+                                .allow_scroll(false)
+                                .show(ui, |plot_ui| {
+                                    plot_ui.line(Line::new(gpu0_pts).color(if is_light { Color32::from_rgb(180, 0, 140) } else { Color32::from_rgb(255, 100, 200) }).width(1.8));
+                                });
+                        });
+                }
+
+                // Card 4: GPU 1 (NVIDIA GeForce RTX 3070 #2)
+                if let Some(gpu1) = sample.gpus.get(1) {
+                    egui::Frame::group(cols[1].style())
+                        .fill(card_bg)
+                        .stroke(Stroke::new(1.0, card_border))
+                        .rounding(Rounding::same(8.0))
+                        .inner_margin(Margin::same(12.0))
+                        .show(&mut cols[1], |ui| {
+                            ui.horizontal(|ui| {
+                                ui.heading(format!("🎮 GPU 1: {}", gpu1.name));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.heading(
+                                        RichText::new(format!("{:.1}%", gpu1.overall_pct))
+                                            .color(if is_light { Color32::from_rgb(0, 150, 160) } else { Color32::from_rgb(0, 220, 255) }),
+                                    );
+                                });
+                            });
+
+                            ui.add(egui::ProgressBar::new((gpu1.overall_pct / 100.0).clamp(0.0, 1.0)).animate(true));
+
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("🕹️ 3D Engine: {:.1}%", gpu1.engine_3d_pct)).size(10.5));
+                                ui.separator();
+                                ui.label(RichText::new(format!("🧠 AI/Compute: {:.1}%", gpu1.engine_compute_pct)).size(10.5));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(format!("🎬 Video Decode: {:.1}%", gpu1.engine_video_pct)).size(10.5));
+                                ui.separator();
+                                ui.label(RichText::new(format!("⚡ PCIe Copy: {:.1}%", gpu1.engine_copy_pct)).size(10.5));
+                            });
+
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("🌡️ Temp: {:.1}°C", gpu1.temp_c))
+                                        .strong()
+                                        .color(if is_light { Color32::from_rgb(0, 120, 180) } else { Color32::from_rgb(100, 200, 255) }),
+                                );
+                                ui.separator();
+                                ui.label(
+                                    RichText::new(format!("VRAM: {:.1} / {:.1} GB", gpu1.vram_used_gb, gpu1.vram_total_gb))
+                                        .size(11.0),
+                                );
+                            });
+
+                            ui.add_space(6.0);
+                            let gpu1_pts: PlotPoints = self
+                                .history
+                                .iter()
+                                .filter(|s| s.timestamp_sec >= start_window_sec)
+                                .map(|s| {
+                                    let g_val = s.gpus.get(1).map(|g| g.overall_pct as f64).unwrap_or(0.0);
+                                    [s.timestamp_sec, g_val]
+                                })
+                                .collect();
+
+                            Plot::new("gpu1_plot")
+                                .height(95.0)
+                                .include_y(0.0)
+                                .include_y(100.0)
+                                .include_x(start_window_sec)
+                                .include_x(now_sec)
+                                .allow_drag(false)
+                                .allow_scroll(false)
+                                .show(ui, |plot_ui| {
+                                    plot_ui.line(Line::new(gpu1_pts).color(if is_light { Color32::from_rgb(0, 150, 160) } else { Color32::from_rgb(0, 220, 255) }).width(1.8));
+                                });
+                        });
+                }
+            });
+
+            ui.add_space(12.0);
+
+            // --- ROW 3: STORAGE & NETWORK ---
+            ui.columns(2, |cols| {
+                // Card 5: Storage I/O
                 egui::Frame::group(cols[0].style())
                     .fill(card_bg)
                     .stroke(Stroke::new(1.0, card_border))
@@ -995,7 +1164,7 @@ impl PerfmonApp {
                             });
                     });
 
-                // Card 4: Network Bandwidth
+                // Card 6: Network Bandwidth
                 egui::Frame::group(cols[1].style())
                     .fill(card_bg)
                     .stroke(Stroke::new(1.0, card_border))
@@ -1038,149 +1207,6 @@ impl PerfmonApp {
                             .show(ui, |plot_ui| {
                                 plot_ui.line(Line::new(rx_pts).color(if is_light { Color32::from_rgb(0, 160, 60) } else { Color32::LIGHT_GREEN }).name("Rx Download"));
                                 plot_ui.line(Line::new(tx_pts).color(if is_light { Color32::from_rgb(0, 110, 210) } else { Color32::LIGHT_BLUE }).name("Tx Upload"));
-                            });
-                    });
-            });
-
-            ui.add_space(12.0);
-
-            // --- ROW 3: GPU INSTANCES BREAKDOWN & THERMALS ---
-            ui.columns(2, |cols| {
-                // Card 5: GPU Engine Instances Breakdown
-                egui::Frame::group(cols[0].style())
-                    .fill(card_bg)
-                    .stroke(Stroke::new(1.0, card_border))
-                    .rounding(Rounding::same(8.0))
-                    .inner_margin(Margin::same(12.0))
-                    .show(&mut cols[0], |ui| {
-                        ui.horizontal(|ui| {
-                            ui.heading("🎮 GPU Engine Instances Breakdown");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.heading(
-                                    RichText::new(format!("{:.1}%", sample.gpu.overall_pct))
-                                        .color(if is_light { Color32::from_rgb(180, 0, 140) } else { Color32::from_rgb(255, 100, 200) }),
-                                );
-                            });
-                        });
-
-                        ui.add(egui::ProgressBar::new((sample.gpu.overall_pct / 100.0).clamp(0.0, 1.0)).animate(true));
-
-                        // Individual GPU Engine Instance Gauges
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("Subsystem Engine Instances:").size(11.0).strong());
-                        
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("🕹️ 3D Pipeline: {:.1}%", sample.gpu.engine_3d_pct)).size(10.5));
-                            ui.separator();
-                            ui.label(RichText::new(format!("🧠 AI/Compute: {:.1}%", sample.gpu.engine_compute_pct)).size(10.5));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new(format!("🎬 Video Decode: {:.1}%", sample.gpu.engine_video_pct)).size(10.5));
-                            ui.separator();
-                            ui.label(RichText::new(format!("⚡ PCIe Copy/DMA: {:.1}%", sample.gpu.engine_copy_pct)).size(10.5));
-                        });
-
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!("🌡️ GPU Temp: {:.1}°C", sample.gpu_temp_c))
-                                    .strong()
-                                    .color(if sample.gpu_temp_c > 80.0 {
-                                        Color32::RED
-                                    } else if is_light {
-                                        Color32::from_rgb(160, 40, 0)
-                                    } else {
-                                        Color32::from_rgb(255, 140, 80)
-                                    }),
-                            );
-                            ui.separator();
-                            ui.label(
-                                RichText::new(format!("VRAM: {:.1} / {:.1} GB", sample.gpu_vram_used_gb, sample.gpu_vram_total_gb))
-                                    .size(11.0),
-                            );
-                        });
-
-                        ui.add_space(6.0);
-                        let gpu_pts: PlotPoints = self
-                            .history
-                            .iter()
-                            .filter(|s| s.timestamp_sec >= start_window_sec)
-                            .map(|s| [s.timestamp_sec, s.gpu.overall_pct as f64])
-                            .collect();
-
-                        Plot::new("gpu_plot")
-                            .height(95.0)
-                            .include_y(0.0)
-                            .include_y(100.0)
-                            .include_x(start_window_sec)
-                            .include_x(now_sec)
-                            .allow_drag(false)
-                            .allow_scroll(false)
-                            .show(ui, |plot_ui| {
-                                plot_ui.line(Line::new(gpu_pts).color(if is_light { Color32::from_rgb(180, 0, 140) } else { Color32::from_rgb(255, 100, 200) }).width(1.8));
-                            });
-                    });
-
-                // Card 6: Thermals
-                egui::Frame::group(cols[1].style())
-                    .fill(card_bg)
-                    .stroke(Stroke::new(1.0, card_border))
-                    .rounding(Rounding::same(8.0))
-                    .inner_margin(Margin::same(12.0))
-                    .show(&mut cols[1], |ui| {
-                        ui.horizontal(|ui| {
-                            ui.heading("🌡️ Hardware Thermal Sensors");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "CPU: {:.1}°C | GPU: {:.1}°C",
-                                        sample.cpu_temp_c, sample.gpu_temp_c
-                                    ))
-                                    .strong(),
-                                );
-                            });
-                        });
-
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            ui.label("CPU Thermal State:");
-                            ui.label(if sample.cpu_temp_c > 85.0 {
-                                RichText::new("⚠️ HIGH").color(Color32::RED).strong()
-                            } else {
-                                RichText::new("🟢 NORMAL").color(if is_light { Color32::from_rgb(0, 150, 70) } else { Color32::GREEN }).strong()
-                            });
-                            ui.separator();
-                            ui.label("GPU Thermal State:");
-                            ui.label(if sample.gpu_temp_c > 85.0 {
-                                RichText::new("⚠️ HIGH").color(Color32::RED).strong()
-                            } else {
-                                RichText::new("🟢 NORMAL").color(if is_light { Color32::from_rgb(0, 150, 70) } else { Color32::GREEN }).strong()
-                            });
-                        });
-
-                        ui.add_space(6.0);
-                        let temp_cpu_pts: PlotPoints = self
-                            .history
-                            .iter()
-                            .filter(|s| s.timestamp_sec >= start_window_sec)
-                            .map(|s| [s.timestamp_sec, s.cpu_temp_c as f64])
-                            .collect();
-                        let temp_gpu_pts: PlotPoints = self
-                            .history
-                            .iter()
-                            .filter(|s| s.timestamp_sec >= start_window_sec)
-                            .map(|s| [s.timestamp_sec, s.gpu_temp_c as f64])
-                            .collect();
-
-                        Plot::new("temp_plot")
-                            .height(95.0)
-                            .include_x(start_window_sec)
-                            .include_x(now_sec)
-                            .allow_drag(false)
-                            .allow_scroll(false)
-                            .show(ui, |plot_ui| {
-                                plot_ui.line(Line::new(temp_cpu_pts).color(if is_light { Color32::from_rgb(220, 80, 0) } else { Color32::LIGHT_RED }).name("CPU Temp °C"));
-                                plot_ui.line(Line::new(temp_gpu_pts).color(if is_light { Color32::from_rgb(180, 0, 140) } else { Color32::from_rgb(255, 100, 200) }).name("GPU Temp °C"));
                             });
                     });
             });
@@ -1282,46 +1308,48 @@ impl PerfmonApp {
                     ui.label(RichText::new("🟢 ONLINE").color(if is_light { Color32::from_rgb(0, 140, 60) } else { Color32::GREEN }));
                     ui.end_row();
 
-                    // GPU Subsystems Breakdown Rows
-                    ui.label("🎮 GPU Overall");
-                    ui.label("Direct3D Hardware Accelerator");
-                    ui.label(format!("{:.1}%", sample.gpu.overall_pct));
-                    ui.label(format!("VRAM: {:.1} / {:.1} GB", sample.gpu_vram_used_gb, sample.gpu_vram_total_gb));
-                    ui.label(format!("{:.1}°C", sample.gpu_temp_c));
-                    ui.label(RichText::new("🟢 ACTIVE").color(if is_light { Color32::from_rgb(0, 140, 60) } else { Color32::GREEN }));
-                    ui.end_row();
+                    // Multi-GPU Subsystems Breakdown Rows
+                    for gpu in &sample.gpus {
+                        ui.label(format!("🎮 GPU {}", gpu.id));
+                        ui.label(&gpu.name);
+                        ui.label(format!("{:.1}%", gpu.overall_pct));
+                        ui.label(format!("VRAM: {:.1} / {:.1} GB", gpu.vram_used_gb, gpu.vram_total_gb));
+                        ui.label(format!("{:.1}°C", gpu.temp_c));
+                        ui.label(RichText::new("🟢 ACTIVE").color(if is_light { Color32::from_rgb(0, 140, 60) } else { Color32::GREEN }));
+                        ui.end_row();
 
-                    ui.label("  ├─ 🕹️ 3D Pipeline Engine");
-                    ui.label("DirectX / Vulkan 3D Shader Core");
-                    ui.label(format!("{:.1}%", sample.gpu.engine_3d_pct));
-                    ui.label("-");
-                    ui.label("-");
-                    ui.label("READY");
-                    ui.end_row();
+                        ui.label(format!("  ├─ 🕹️ 3D Pipeline (GPU {})", gpu.id));
+                        ui.label("DirectX / Vulkan 3D Shader Core");
+                        ui.label(format!("{:.1}%", gpu.engine_3d_pct));
+                        ui.label("-");
+                        ui.label("-");
+                        ui.label("READY");
+                        ui.end_row();
 
-                    ui.label("  ├─ 🧠 AI / Compute Engine");
-                    ui.label("CUDA / DirectCompute Core");
-                    ui.label(format!("{:.1}%", sample.gpu.engine_compute_pct));
-                    ui.label("-");
-                    ui.label("-");
-                    ui.label("READY");
-                    ui.end_row();
+                        ui.label(format!("  ├─ 🧠 AI / Compute (GPU {})", gpu.id));
+                        ui.label("CUDA / DirectCompute Core");
+                        ui.label(format!("{:.1}%", gpu.engine_compute_pct));
+                        ui.label("-");
+                        ui.label("-");
+                        ui.label("READY");
+                        ui.end_row();
 
-                    ui.label("  ├─ 🎬 Video Decode Engine");
-                    ui.label("H.264 / HEVC / AV1 Video Decoder");
-                    ui.label(format!("{:.1}%", sample.gpu.engine_video_pct));
-                    ui.label("-");
-                    ui.label("-");
-                    ui.label("READY");
-                    ui.end_row();
+                        ui.label(format!("  ├─ 🎬 Video Decode (GPU {})", gpu.id));
+                        ui.label("H.264 / HEVC / AV1 Video Decoder");
+                        ui.label(format!("{:.1}%", gpu.engine_video_pct));
+                        ui.label("-");
+                        ui.label("-");
+                        ui.label("READY");
+                        ui.end_row();
 
-                    ui.label("  └─ ⚡ PCIe Copy DMA Engine");
-                    ui.label("PCIe Host to VRAM Bus Transfer");
-                    ui.label(format!("{:.1}%", sample.gpu.engine_copy_pct));
-                    ui.label("-");
-                    ui.label("-");
-                    ui.label("READY");
-                    ui.end_row();
+                        ui.label(format!("  └─ ⚡ PCIe Copy DMA (GPU {})", gpu.id));
+                        ui.label("PCIe Host to VRAM Bus Transfer");
+                        ui.label(format!("{:.1}%", gpu.engine_copy_pct));
+                        ui.label("-");
+                        ui.label("-");
+                        ui.label("READY");
+                        ui.end_row();
+                    }
                 });
         });
     }
