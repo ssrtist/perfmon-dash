@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
@@ -449,6 +451,54 @@ pub enum ViewMode {
     Dashboard,
 }
 
+pub fn setup_custom_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+
+    let font_candidates = [
+        ("SegoeUIVariable", "C:\\Windows\\Fonts\\SegUIVar.ttf"),
+        ("SegoeUI", "C:\\Windows\\Fonts\\segoeui.ttf"),
+        ("SegoeUI-Semibold", "C:\\Windows\\Fonts\\seguisb.ttf"),
+        ("SegoeUI-Bold", "C:\\Windows\\Fonts\\segoeuib.ttf"),
+        ("SegoeUI-Light", "C:\\Windows\\Fonts\\segoeuil.ttf"),
+        ("SegoeUI-Emoji", "C:\\Windows\\Fonts\\seguiemj.ttf"),
+        ("Consolas", "C:\\Windows\\Fonts\\consola.ttf"),
+    ];
+
+    let mut loaded_primary = false;
+    for (name, path) in font_candidates {
+        if let Ok(bytes) = std::fs::read(path) {
+            fonts
+                .font_data
+                .insert(name.to_string(), egui::FontData::from_owned(bytes).into());
+            if name == "SegoeUIVariable" || name == "SegoeUI" {
+                loaded_primary = true;
+            }
+        }
+    }
+
+    if loaded_primary {
+        if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            if fonts.font_data.contains_key("SegoeUIVariable") {
+                prop.insert(0, "SegoeUIVariable".to_string());
+            }
+            if fonts.font_data.contains_key("SegoeUI") {
+                prop.insert(0, "SegoeUI".to_string());
+            }
+            if fonts.font_data.contains_key("SegoeUI-Emoji") {
+                prop.push("SegoeUI-Emoji".to_string());
+            }
+        }
+
+        if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            if fonts.font_data.contains_key("Consolas") {
+                mono.insert(0, "Consolas".to_string());
+            }
+        }
+    }
+
+    ctx.set_fonts(fonts);
+}
+
 #[derive(PartialEq)]
 pub enum DashboardTab {
     Tiles,
@@ -457,15 +507,25 @@ pub enum DashboardTab {
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum ThemeMode {
+    Win11TaskMgrDark,
+    Win11TaskMgrLight,
     CleanLight,
     DarkCyber,
     MidnightBlue,
+}
+
+#[derive(PartialEq, Clone, Copy)]
+pub enum CpuGraphMode {
+    LogicalCoresGrid,
+    OverallUtilization,
+    MultiCoreOverlay,
 }
 
 pub struct PerfmonApp {
     view_mode: ViewMode,
     current_tab: DashboardTab,
     theme: ThemeMode,
+    cpu_graph_mode: CpuGraphMode,
     splash_duration_sec: f32,
     splash_elapsed_sec: f32,
     start_instant: Instant,
@@ -482,6 +542,8 @@ pub struct PerfmonApp {
 
 impl PerfmonApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        setup_custom_fonts(&cc.egui_ctx);
+
         let mut sys = System::new_all();
         sys.refresh_all();
 
@@ -514,16 +576,11 @@ impl PerfmonApp {
         let (sender, receiver) = unbounded();
         spawn_telemetry_worker(sender, 500);
 
-        let mut visuals = Visuals::light();
-        visuals.panel_fill = Color32::from_rgb(240, 244, 248);
-        visuals.window_fill = Color32::from_rgb(255, 255, 255);
-        visuals.window_rounding = Rounding::same(10.0);
-        cc.egui_ctx.set_visuals(visuals);
-
-        Self {
+        let app = Self {
             view_mode: ViewMode::Splash,
             current_tab: DashboardTab::Tiles,
-            theme: ThemeMode::CleanLight,
+            theme: ThemeMode::Win11TaskMgrLight,
+            cpu_graph_mode: CpuGraphMode::LogicalCoresGrid,
             splash_duration_sec: 2.5,
             splash_elapsed_sec: 0.0,
             start_instant: Instant::now(),
@@ -534,7 +591,9 @@ impl PerfmonApp {
             history_duration_sec: 60.0,
             static_info,
             refresh_rate_ms: 500,
-        }
+        };
+        app.apply_theme_visuals(&cc.egui_ctx);
+        app
     }
 
     fn update_telemetry(&mut self) {
@@ -549,6 +608,32 @@ impl PerfmonApp {
 
     fn apply_theme_visuals(&self, ctx: &egui::Context) {
         match self.theme {
+            ThemeMode::Win11TaskMgrDark => {
+                let mut v = Visuals::dark();
+                v.panel_fill = Color32::from_rgb(32, 32, 32);       // #202020 Task Manager Mica Dark
+                v.window_fill = Color32::from_rgb(44, 44, 44);      // #2C2C2C Card Dark
+                v.widgets.noninteractive.bg_fill = Color32::from_rgb(44, 44, 44);
+                v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(240, 240, 240));
+                v.widgets.inactive.bg_fill = Color32::from_rgb(52, 52, 52);
+                v.widgets.hovered.bg_fill = Color32::from_rgb(60, 60, 60);
+                v.widgets.active.bg_fill = Color32::from_rgb(0, 103, 192);
+                v.hyperlink_color = Color32::from_rgb(96, 205, 255); // #60CDFF Accent Blue
+                v.window_rounding = Rounding::same(6.0);
+                ctx.set_visuals(v);
+            }
+            ThemeMode::Win11TaskMgrLight => {
+                let mut v = Visuals::light();
+                v.panel_fill = Color32::from_rgb(243, 243, 243);     // #F3F3F3 Task Manager Fluent Light
+                v.window_fill = Color32::from_rgb(255, 255, 255);    // White Cards
+                v.widgets.noninteractive.bg_fill = Color32::from_rgb(255, 255, 255);
+                v.widgets.noninteractive.fg_stroke = Stroke::new(1.0, Color32::from_rgb(30, 30, 30));
+                v.widgets.inactive.bg_fill = Color32::from_rgb(238, 238, 238);
+                v.widgets.hovered.bg_fill = Color32::from_rgb(230, 230, 230);
+                v.widgets.active.bg_fill = Color32::from_rgb(0, 103, 192);
+                v.hyperlink_color = Color32::from_rgb(0, 103, 192);  // #0067C0 Windows Accent
+                v.window_rounding = Rounding::same(6.0);
+                ctx.set_visuals(v);
+            }
             ThemeMode::CleanLight => {
                 let mut v = Visuals::light();
                 v.panel_fill = Color32::from_rgb(242, 245, 250);
@@ -584,7 +669,7 @@ impl PerfmonApp {
             self.view_mode = ViewMode::Dashboard;
         }
 
-        let is_light = self.theme == ThemeMode::CleanLight;
+        let is_light = matches!(self.theme, ThemeMode::CleanLight | ThemeMode::Win11TaskMgrLight);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -703,7 +788,7 @@ impl PerfmonApp {
 
     // --- MAIN DASHBOARD RENDERER ---
     fn render_dashboard(&mut self, ctx: &egui::Context) {
-        let is_light = self.theme == ThemeMode::CleanLight;
+        let is_light = matches!(self.theme, ThemeMode::CleanLight | ThemeMode::Win11TaskMgrLight);
 
         egui::TopBottomPanel::top("header_panel")
             .exact_height(54.0)
@@ -751,11 +836,15 @@ impl PerfmonApp {
 
                         egui::ComboBox::from_id_salt("theme_combo")
                             .selected_text(match self.theme {
+                                ThemeMode::Win11TaskMgrDark => "💻 Win 11 Dark (Task Mgr)",
+                                ThemeMode::Win11TaskMgrLight => "🔲 Win 11 Light (Task Mgr)",
                                 ThemeMode::CleanLight => "☀️ Clean Light",
                                 ThemeMode::DarkCyber => "🌙 Cyber Dark",
                                 ThemeMode::MidnightBlue => "🌌 Midnight Blue",
                             })
                             .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut self.theme, ThemeMode::Win11TaskMgrDark, "💻 Win 11 Dark (Task Mgr)");
+                                ui.selectable_value(&mut self.theme, ThemeMode::Win11TaskMgrLight, "🔲 Win 11 Light (Task Mgr)");
                                 ui.selectable_value(&mut self.theme, ThemeMode::CleanLight, "☀️ Clean Light");
                                 ui.selectable_value(&mut self.theme, ThemeMode::DarkCyber, "🌙 Cyber Dark");
                                 ui.selectable_value(&mut self.theme, ThemeMode::MidnightBlue, "🌌 Midnight Blue");
@@ -807,411 +896,494 @@ impl PerfmonApp {
         ctx.request_repaint_after(Duration::from_millis(self.refresh_rate_ms));
     }
 
-    // --- TILES VIEW (WITH DEDICATED CARDS FOR BOTH GPUS) ---
-    fn render_tiles_view(&self, ui: &mut egui::Ui) {
+    // --- TILES VIEW (UNIFORM SIZED CARDS, AUTO-RESIZING VERTICALLY & HORIZONTALLY) ---
+    fn render_tiles_view(&mut self, ui: &mut egui::Ui) {
         let sample = match &self.latest_sample {
             Some(s) => s,
             None => return,
         };
 
-        let is_light = self.theme == ThemeMode::CleanLight;
-        let card_bg = if is_light { Color32::from_rgb(255, 255, 255) } else { Color32::from_rgb(22, 28, 38) };
-        let card_border = if is_light { Color32::from_rgb(220, 228, 238) } else { Color32::from_rgb(40, 50, 65) };
+        let is_light = matches!(self.theme, ThemeMode::CleanLight | ThemeMode::Win11TaskMgrLight);
+        let card_bg = match self.theme {
+            ThemeMode::Win11TaskMgrDark => Color32::from_rgb(44, 44, 44),
+            ThemeMode::Win11TaskMgrLight => Color32::from_rgb(255, 255, 255),
+            ThemeMode::CleanLight => Color32::from_rgb(255, 255, 255),
+            ThemeMode::DarkCyber => Color32::from_rgb(22, 28, 38),
+            ThemeMode::MidnightBlue => Color32::from_rgb(16, 22, 40),
+        };
+        let card_border = match self.theme {
+            ThemeMode::Win11TaskMgrDark => Color32::from_rgb(56, 56, 56),
+            ThemeMode::Win11TaskMgrLight => Color32::from_rgb(225, 225, 225),
+            ThemeMode::CleanLight => Color32::from_rgb(220, 228, 238),
+            ThemeMode::DarkCyber => Color32::from_rgb(40, 50, 65),
+            ThemeMode::MidnightBlue => Color32::from_rgb(35, 48, 75),
+        };
 
-        let primary_plot_color = if is_light { Color32::from_rgb(0, 120, 215) } else { Color32::from_rgb(0, 230, 200) };
-        let secondary_plot_color = if is_light { Color32::from_rgb(100, 60, 210) } else { Color32::from_rgb(120, 180, 255) };
+        let primary_plot_color = match self.theme {
+            ThemeMode::Win11TaskMgrDark => Color32::from_rgb(96, 205, 255),
+            ThemeMode::Win11TaskMgrLight => Color32::from_rgb(0, 103, 192),
+            ThemeMode::CleanLight => Color32::from_rgb(0, 120, 215),
+            ThemeMode::DarkCyber => Color32::from_rgb(0, 230, 200),
+            ThemeMode::MidnightBlue => Color32::from_rgb(0, 210, 255),
+        };
+        let secondary_plot_color = match self.theme {
+            ThemeMode::Win11TaskMgrDark => Color32::from_rgb(170, 140, 255),
+            ThemeMode::Win11TaskMgrLight => Color32::from_rgb(110, 60, 200),
+            ThemeMode::CleanLight => Color32::from_rgb(100, 60, 210),
+            ThemeMode::DarkCyber => Color32::from_rgb(120, 180, 255),
+            ThemeMode::MidnightBlue => Color32::from_rgb(130, 160, 255),
+        };
 
         let now_sec = sample.timestamp_sec;
         let start_window_sec = (now_sec - self.history_duration_sec).max(0.0);
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.add_space(8.0);
+        // Compute uniform height for all 6 cards so they auto-resize vertically to fill the display
+        let total_avail_h = ui.available_height();
+        let uniform_card_h = ((total_avail_h - 26.0) / 3.0).max(180.0);
 
-            // --- ROW 1: CPU & MEMORY ---
-            ui.columns(2, |cols| {
-                // Card 1: CPU Cores & Threads Breakdown
-                egui::Frame::group(cols[0].style())
-                    .fill(card_bg)
-                    .stroke(Stroke::new(1.0, card_border))
-                    .rounding(Rounding::same(8.0))
-                    .inner_margin(Margin::same(12.0))
-                    .show(&mut cols[0], |ui| {
-                        ui.horizontal(|ui| {
-                            ui.heading("🔲 CPU Cores & Threads Topology");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.heading(
-                                    RichText::new(format!("{:.1}%", sample.cpu_usage_pct))
-                                        .color(if sample.cpu_usage_pct > 85.0 {
-                                            Color32::RED
-                                        } else {
-                                            primary_plot_color
-                                        }),
-                                );
-                            });
-                        });
-
-                        ui.add(egui::ProgressBar::new((sample.cpu_usage_pct / 100.0).clamp(0.0, 1.0)).animate(true));
-
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(format!("Physical Cores ({}) Load:", sample.cpu_physical_pct.len())).size(11.0).strong());
-                        ui.horizontal_wrapped(|ui| {
-                            for (i, core_pct) in sample.cpu_physical_pct.iter().enumerate() {
-                                ui.label(
-                                    RichText::new(format!("Core {}: {:.0}%", i, core_pct))
-                                        .size(10.0)
-                                        .color(if *core_pct > 80.0 {
-                                            Color32::from_rgb(220, 50, 50)
-                                        } else if is_light {
-                                            Color32::from_rgb(0, 100, 180)
-                                        } else {
-                                            Color32::from_rgb(0, 200, 220)
-                                        }),
-                                );
-                            }
-                        });
-
-                        ui.add_space(4.0);
-                        ui.label(RichText::new(format!("Logical Threads ({}) Grid:", sample.cpu_cores_pct.len())).size(11.0).strong());
-                        ui.horizontal_wrapped(|ui| {
-                            for (i, core_pct) in sample.cpu_cores_pct.iter().enumerate() {
-                                ui.label(
-                                    RichText::new(format!("T{:02}: {:.0}%", i, core_pct))
-                                        .size(10.0)
-                                        .color(if *core_pct > 80.0 {
-                                            Color32::from_rgb(220, 50, 50)
-                                        } else if is_light {
-                                            Color32::from_rgb(70, 85, 105)
-                                        } else {
-                                            Color32::GRAY
-                                        }),
-                                );
-                            }
-                        });
-
-                        ui.add_space(6.0);
-                        let points: PlotPoints = self
-                            .history
-                            .iter()
-                            .filter(|s| s.timestamp_sec >= start_window_sec)
-                            .map(|s| [s.timestamp_sec, s.cpu_usage_pct as f64])
-                            .collect();
-
-                        Plot::new("cpu_plot")
-                            .height(105.0)
-                            .include_y(0.0)
-                            .include_y(100.0)
-                            .include_x(start_window_sec)
-                            .include_x(now_sec)
-                            .allow_drag(false)
-                            .allow_scroll(false)
-                            .show(ui, |plot_ui| {
-                                plot_ui.line(Line::new(points).color(primary_plot_color).width(2.0));
-                            });
-                    });
-
-                // Card 2: Memory & Swap
-                egui::Frame::group(cols[1].style())
-                    .fill(card_bg)
-                    .stroke(Stroke::new(1.0, card_border))
-                    .rounding(Rounding::same(8.0))
-                    .inner_margin(Margin::same(12.0))
-                    .show(&mut cols[1], |ui| {
-                        ui.horizontal(|ui| {
-                            ui.heading("🧠 System Memory & Virtual Swap");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.heading(
-                                    RichText::new(format!(
-                                        "{:.1} / {:.1} GB ({:.0}%)",
-                                        sample.ram_used_gb, sample.ram_total_gb, sample.ram_pct
-                                    ))
-                                    .color(secondary_plot_color),
-                                );
-                            });
-                        });
-
-                        ui.add(egui::ProgressBar::new((sample.ram_pct / 100.0).clamp(0.0, 1.0)).animate(true));
-
-                        ui.add_space(4.0);
-                        ui.label(
-                            RichText::new(format!(
-                                "Swap Pagefile: {:.2} GB used of {:.2} GB total",
-                                sample.swap_used_gb, sample.swap_total_gb
-                            ))
-                            .size(11.0),
-                        );
-
-                        ui.add_space(6.0);
-                        let points: PlotPoints = self
-                            .history
-                            .iter()
-                            .filter(|s| s.timestamp_sec >= start_window_sec)
-                            .map(|s| [s.timestamp_sec, s.ram_pct as f64])
-                            .collect();
-
-                        Plot::new("ram_plot")
-                            .height(115.0)
-                            .include_y(0.0)
-                            .include_y(100.0)
-                            .include_x(start_window_sec)
-                            .include_x(now_sec)
-                            .allow_drag(false)
-                            .allow_scroll(false)
-                            .show(ui, |plot_ui| {
-                                plot_ui.line(Line::new(points).color(secondary_plot_color).width(2.0));
-                            });
-                    });
-            });
-
-            ui.add_space(12.0);
-
-            // --- ROW 2: DEDICATED CARDS FOR GPU 0 AND GPU 1 ---
-            ui.columns(2, |cols| {
-                // Card 3: GPU 0 (NVIDIA GeForce RTX 3070 #1)
-                if let Some(gpu0) = sample.gpus.first() {
-                    egui::Frame::group(cols[0].style())
-                        .fill(card_bg)
-                        .stroke(Stroke::new(1.0, card_border))
-                        .rounding(Rounding::same(8.0))
-                        .inner_margin(Margin::same(12.0))
-                        .show(&mut cols[0], |ui| {
-                            ui.horizontal(|ui| {
-                                ui.heading(format!("🎮 GPU 0: {}", gpu0.name));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.heading(
-                                        RichText::new(format!("{:.1}%", gpu0.overall_pct))
-                                            .color(if is_light { Color32::from_rgb(180, 0, 140) } else { Color32::from_rgb(255, 100, 200) }),
-                                    );
-                                });
-                            });
-
-                            ui.add(egui::ProgressBar::new((gpu0.overall_pct / 100.0).clamp(0.0, 1.0)).animate(true));
-
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("🕹️ 3D Engine: {:.1}%", gpu0.engine_3d_pct)).size(10.5));
-                                ui.separator();
-                                ui.label(RichText::new(format!("🧠 AI/Compute: {:.1}%", gpu0.engine_compute_pct)).size(10.5));
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("🎬 Video Decode: {:.1}%", gpu0.engine_video_pct)).size(10.5));
-                                ui.separator();
-                                ui.label(RichText::new(format!("⚡ PCIe Copy: {:.1}%", gpu0.engine_copy_pct)).size(10.5));
-                            });
-
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(format!("🌡️ Temp: {:.1}°C", gpu0.temp_c))
-                                        .strong()
-                                        .color(if is_light { Color32::from_rgb(160, 40, 0) } else { Color32::from_rgb(255, 140, 80) }),
-                                );
-                                ui.separator();
-                                ui.label(
-                                    RichText::new(format!("VRAM: {:.1} / {:.1} GB", gpu0.vram_used_gb, gpu0.vram_total_gb))
-                                        .size(11.0),
-                                );
-                            });
-
-                            ui.add_space(6.0);
-                            let gpu0_pts: PlotPoints = self
-                                .history
-                                .iter()
-                                .filter(|s| s.timestamp_sec >= start_window_sec)
-                                .map(|s| {
-                                    let g_val = s.gpus.first().map(|g| g.overall_pct as f64).unwrap_or(0.0);
-                                    [s.timestamp_sec, g_val]
-                                })
-                                .collect();
-
-                            Plot::new("gpu0_plot")
-                                .height(95.0)
-                                .include_y(0.0)
-                                .include_y(100.0)
-                                .include_x(start_window_sec)
-                                .include_x(now_sec)
-                                .allow_drag(false)
-                                .allow_scroll(false)
-                                .show(ui, |plot_ui| {
-                                    plot_ui.line(Line::new(gpu0_pts).color(if is_light { Color32::from_rgb(180, 0, 140) } else { Color32::from_rgb(255, 100, 200) }).width(1.8));
-                                });
-                        });
-                }
-
-                // Card 4: GPU 1 (NVIDIA GeForce RTX 3070 #2)
-                if let Some(gpu1) = sample.gpus.get(1) {
-                    egui::Frame::group(cols[1].style())
-                        .fill(card_bg)
-                        .stroke(Stroke::new(1.0, card_border))
-                        .rounding(Rounding::same(8.0))
-                        .inner_margin(Margin::same(12.0))
-                        .show(&mut cols[1], |ui| {
-                            ui.horizontal(|ui| {
-                                ui.heading(format!("🎮 GPU 1: {}", gpu1.name));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.heading(
-                                        RichText::new(format!("{:.1}%", gpu1.overall_pct))
-                                            .color(if is_light { Color32::from_rgb(0, 150, 160) } else { Color32::from_rgb(0, 220, 255) }),
-                                    );
-                                });
-                            });
-
-                            ui.add(egui::ProgressBar::new((gpu1.overall_pct / 100.0).clamp(0.0, 1.0)).animate(true));
-
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("🕹️ 3D Engine: {:.1}%", gpu1.engine_3d_pct)).size(10.5));
-                                ui.separator();
-                                ui.label(RichText::new(format!("🧠 AI/Compute: {:.1}%", gpu1.engine_compute_pct)).size(10.5));
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("🎬 Video Decode: {:.1}%", gpu1.engine_video_pct)).size(10.5));
-                                ui.separator();
-                                ui.label(RichText::new(format!("⚡ PCIe Copy: {:.1}%", gpu1.engine_copy_pct)).size(10.5));
-                            });
-
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new(format!("🌡️ Temp: {:.1}°C", gpu1.temp_c))
-                                        .strong()
-                                        .color(if is_light { Color32::from_rgb(0, 120, 180) } else { Color32::from_rgb(100, 200, 255) }),
-                                );
-                                ui.separator();
-                                ui.label(
-                                    RichText::new(format!("VRAM: {:.1} / {:.1} GB", gpu1.vram_used_gb, gpu1.vram_total_gb))
-                                        .size(11.0),
-                                );
-                            });
-
-                            ui.add_space(6.0);
-                            let gpu1_pts: PlotPoints = self
-                                .history
-                                .iter()
-                                .filter(|s| s.timestamp_sec >= start_window_sec)
-                                .map(|s| {
-                                    let g_val = s.gpus.get(1).map(|g| g.overall_pct as f64).unwrap_or(0.0);
-                                    [s.timestamp_sec, g_val]
-                                })
-                                .collect();
-
-                            Plot::new("gpu1_plot")
-                                .height(95.0)
-                                .include_y(0.0)
-                                .include_y(100.0)
-                                .include_x(start_window_sec)
-                                .include_x(now_sec)
-                                .allow_drag(false)
-                                .allow_scroll(false)
-                                .show(ui, |plot_ui| {
-                                    plot_ui.line(Line::new(gpu1_pts).color(if is_light { Color32::from_rgb(0, 150, 160) } else { Color32::from_rgb(0, 220, 255) }).width(1.8));
-                                });
-                        });
-                }
-            });
-
-            ui.add_space(12.0);
-
-            // --- ROW 3: STORAGE & NETWORK ---
-            ui.columns(2, |cols| {
-                // Card 5: Storage I/O
-                egui::Frame::group(cols[0].style())
-                    .fill(card_bg)
-                    .stroke(Stroke::new(1.0, card_border))
-                    .rounding(Rounding::same(8.0))
-                    .inner_margin(Margin::same(12.0))
-                    .show(&mut cols[0], |ui| {
-                        ui.horizontal(|ui| {
-                            ui.heading("💾 Storage Drives & I/O Rate");
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "R: {:.0} KB/s | W: {:.0} KB/s",
-                                        sample.disk_read_kbps, sample.disk_write_kbps
-                                    ))
-                                    .strong(),
-                                );
-                            });
-                        });
-
-                        for disk in &sample.disks {
-                            ui.add_space(2.0);
-                            ui.label(
-                                RichText::new(format!(
-                                    "Drive {}: {:.1} GB / {:.1} GB ({:.0}%)",
-                                    disk.mount_point, disk.used_gb, disk.total_gb, disk.usage_pct
-                                ))
-                                .size(11.0),
+        // ROW 1: CPU (Card 1) & Memory (Card 2)
+        ui.columns(2, |cols| {
+            // Card 1: CPU Topology & Logical Cores Grid
+            cols[0].set_height(uniform_card_h);
+            cols[0].set_max_height(uniform_card_h);
+            egui::Frame::group(cols[0].style())
+                .fill(card_bg)
+                .stroke(Stroke::new(1.0, card_border))
+                .rounding(Rounding::same(6.0))
+                .inner_margin(Margin::same(10.0))
+                .show(&mut cols[0], |ui| {
+                    ui.set_height(uniform_card_h - 20.0);
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.heading("🔲 CPU Topology & Core Grid");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.heading(
+                                RichText::new(format!("{:.1}%", sample.cpu_usage_pct))
+                                    .color(if sample.cpu_usage_pct > 85.0 { Color32::RED } else { primary_plot_color }),
                             );
-                            ui.add(egui::ProgressBar::new((disk.usage_pct / 100.0).clamp(0.0, 1.0)));
-                        }
-
-                        ui.add_space(6.0);
-                        let read_pts: PlotPoints = self
-                            .history
-                            .iter()
-                            .filter(|s| s.timestamp_sec >= start_window_sec)
-                            .map(|s| [s.timestamp_sec, s.disk_read_kbps as f64])
-                            .collect();
-
-                        Plot::new("disk_plot")
-                            .height(115.0)
-                            .include_x(start_window_sec)
-                            .include_x(now_sec)
-                            .allow_drag(false)
-                            .allow_scroll(false)
-                            .show(ui, |plot_ui| {
-                                plot_ui.line(Line::new(read_pts).color(if is_light { Color32::from_rgb(210, 130, 0) } else { Color32::GOLD }).width(1.8));
-                            });
+                            ui.add_space(6.0);
+                            egui::ComboBox::from_id_salt("cpu_graph_mode_combo")
+                                .selected_text(match self.cpu_graph_mode {
+                                    CpuGraphMode::LogicalCoresGrid => "📊 16 Cores Grid",
+                                    CpuGraphMode::OverallUtilization => "📈 Overall Plot",
+                                    CpuGraphMode::MultiCoreOverlay => "🔀 Overlay",
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.cpu_graph_mode, CpuGraphMode::LogicalCoresGrid, "📊 16 Cores Grid");
+                                    ui.selectable_value(&mut self.cpu_graph_mode, CpuGraphMode::OverallUtilization, "📈 Overall Plot");
+                                    ui.selectable_value(&mut self.cpu_graph_mode, CpuGraphMode::MultiCoreOverlay, "🔀 Overlay");
+                                });
+                        });
                     });
 
-                // Card 6: Network Bandwidth
-                egui::Frame::group(cols[1].style())
+                    ui.add(egui::ProgressBar::new((sample.cpu_usage_pct / 100.0).clamp(0.0, 1.0)).desired_width(ui.available_width()).animate(true));
+
+                    let cpu_rem_h = (ui.available_height() - 6.0).max(80.0);
+
+                    match self.cpu_graph_mode {
+                        CpuGraphMode::LogicalCoresGrid => {
+                            let num_cores = sample.cpu_cores_pct.len();
+                            let grid_cols = 4;
+                            let grid_rows = 4;
+                            let col_w = ((ui.available_width() - 24.0) / 4.0).max(40.0);
+                            let cell_h = ((cpu_rem_h - 32.0) / grid_rows as f32).max(24.0);
+
+                            egui::Grid::new("logical_cores_grid_plots")
+                                .num_columns(grid_cols)
+                                .spacing([6.0, 2.0])
+                                .min_col_width(col_w)
+                                .show(ui, |ui| {
+                                    for i in 0..num_cores {
+                                        let thread_pct = sample.cpu_cores_pct.get(i).copied().unwrap_or(0.0);
+                                        let thread_pts: PlotPoints = self
+                                            .history
+                                            .iter()
+                                            .filter(|s| s.timestamp_sec >= start_window_sec)
+                                            .map(|s| [s.timestamp_sec, s.cpu_cores_pct.get(i).copied().unwrap_or(0.0) as f64])
+                                            .collect();
+
+                                        ui.vertical(|ui| {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    RichText::new(format!("T{:02}", i))
+                                                        .size(9.5)
+                                                        .strong()
+                                                        .color(if is_light { Color32::from_rgb(40, 55, 75) } else { Color32::from_rgb(180, 195, 215) }),
+                                                );
+                                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                    ui.label(
+                                                        RichText::new(format!("{:.0}%", thread_pct))
+                                                            .size(9.5)
+                                                            .strong()
+                                                            .color(if thread_pct > 80.0 { Color32::from_rgb(240, 60, 60) } else { primary_plot_color }),
+                                                    );
+                                                });
+                                            });
+
+                                            Plot::new(format!("core_grid_plot_{}", i))
+                                                .height(cell_h)
+                                                .width(col_w)
+                                                .include_y(0.0)
+                                                .include_y(100.0)
+                                                .include_x(start_window_sec)
+                                                .include_x(now_sec)
+                                                .show_axes([false, false])
+                                                .show_x(false)
+                                                .show_y(false)
+                                                .allow_drag(false)
+                                                .allow_scroll(false)
+                                                .show(ui, |plot_ui| {
+                                                    plot_ui.line(
+                                                        Line::new(thread_pts)
+                                                            .color(if thread_pct > 80.0 { Color32::from_rgb(255, 70, 70) } else { primary_plot_color })
+                                                            .width(1.3),
+                                                    );
+                                                });
+                                        });
+
+                                        if (i + 1) % grid_cols == 0 {
+                                            ui.end_row();
+                                        }
+                                    }
+                                });
+                        }
+                        CpuGraphMode::OverallUtilization => {
+                            let points: PlotPoints = self
+                                .history
+                                .iter()
+                                .filter(|s| s.timestamp_sec >= start_window_sec)
+                                .map(|s| [s.timestamp_sec, s.cpu_usage_pct as f64])
+                                .collect();
+
+                            Plot::new("cpu_plot_overall")
+                                .height(cpu_rem_h)
+                                .width(ui.available_width())
+                                .include_y(0.0)
+                                .include_y(100.0)
+                                .include_x(start_window_sec)
+                                .include_x(now_sec)
+                                .allow_drag(false)
+                                .allow_scroll(false)
+                                .show(ui, |plot_ui| {
+                                    plot_ui.line(Line::new(points).color(primary_plot_color).width(2.0));
+                                });
+                        }
+                        CpuGraphMode::MultiCoreOverlay => {
+                            Plot::new("cpu_plot_multi_overlay")
+                                .height(cpu_rem_h)
+                                .width(ui.available_width())
+                                .include_y(0.0)
+                                .include_y(100.0)
+                                .include_x(start_window_sec)
+                                .include_x(now_sec)
+                                .allow_drag(false)
+                                .allow_scroll(false)
+                                .show(ui, |plot_ui| {
+                                    let num_cores = sample.cpu_cores_pct.len();
+                                    for i in 0..num_cores {
+                                        let pts: PlotPoints = self
+                                            .history
+                                            .iter()
+                                            .filter(|s| s.timestamp_sec >= start_window_sec)
+                                            .map(|s| [s.timestamp_sec, s.cpu_cores_pct.get(i).copied().unwrap_or(0.0) as f64])
+                                            .collect();
+                                        let hue = (i as f32 / num_cores as f32) * 0.85;
+                                        let color = Color32::from_rgb(
+                                            (100.0 + 155.0 * hue).clamp(0.0, 255.0) as u8,
+                                            (180.0 + 75.0 * (1.0 - hue)).clamp(0.0, 255.0) as u8,
+                                            (220.0 * (0.5 + 0.5 * hue)).clamp(0.0, 255.0) as u8,
+                                        );
+                                        plot_ui.line(Line::new(pts).color(color).width(1.5).name(format!("Thread T{:02}", i)));
+                                    }
+                                });
+                        }
+                    }
+                });
+
+            // Card 2: Memory & Swap
+            cols[1].set_height(uniform_card_h);
+            cols[1].set_max_height(uniform_card_h);
+            egui::Frame::group(cols[1].style())
+                .fill(card_bg)
+                .stroke(Stroke::new(1.0, card_border))
+                .rounding(Rounding::same(6.0))
+                .inner_margin(Margin::same(10.0))
+                .show(&mut cols[1], |ui| {
+                    ui.set_height(uniform_card_h - 20.0);
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.heading("🧠 System Memory & Virtual Swap");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.heading(
+                                RichText::new(format!(
+                                    "{:.1} / {:.1} GB ({:.0}%)",
+                                    sample.ram_used_gb, sample.ram_total_gb, sample.ram_pct
+                                ))
+                                .color(secondary_plot_color),
+                            );
+                        });
+                    });
+
+                    ui.add(egui::ProgressBar::new((sample.ram_pct / 100.0).clamp(0.0, 1.0)).desired_width(ui.available_width()).animate(true));
+
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new(format!(
+                            "Pagefile: {:.2} / {:.2} GB used",
+                            sample.swap_used_gb, sample.swap_total_gb
+                        ))
+                        .size(10.5),
+                    );
+
+                    let ram_rem_h = (ui.available_height() - 6.0).max(60.0);
+                    let points: PlotPoints = self
+                        .history
+                        .iter()
+                        .filter(|s| s.timestamp_sec >= start_window_sec)
+                        .map(|s| [s.timestamp_sec, s.ram_pct as f64])
+                        .collect();
+
+                    Plot::new("ram_plot")
+                        .height(ram_rem_h)
+                        .width(ui.available_width())
+                        .include_y(0.0)
+                        .include_y(100.0)
+                        .include_x(start_window_sec)
+                        .include_x(now_sec)
+                        .allow_drag(false)
+                        .allow_scroll(false)
+                        .show(ui, |plot_ui| {
+                            plot_ui.line(Line::new(points).color(secondary_plot_color).width(2.0));
+                        });
+                });
+        });
+
+        ui.add_space(8.0);
+
+        // ROW 2: GPU 0 (Card 3) & GPU 1 (Card 4)
+        ui.columns(2, |cols| {
+            cols[0].set_height(uniform_card_h);
+            cols[0].set_max_height(uniform_card_h);
+            cols[1].set_height(uniform_card_h);
+            cols[1].set_max_height(uniform_card_h);
+
+            // Card 3: GPU 0
+            if let Some(gpu0) = sample.gpus.first() {
+                egui::Frame::group(cols[0].style())
                     .fill(card_bg)
                     .stroke(Stroke::new(1.0, card_border))
-                    .rounding(Rounding::same(8.0))
-                    .inner_margin(Margin::same(12.0))
-                    .show(&mut cols[1], |ui| {
+                    .rounding(Rounding::same(6.0))
+                    .inner_margin(Margin::same(10.0))
+                    .show(&mut cols[0], |ui| {
+                        ui.set_height(uniform_card_h - 20.0);
+                        ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.heading("🌐 Network Bandwidth");
+                            ui.heading(format!("🎮 GPU 0: {}", gpu0.name));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "⬇ {:.1} KB/s  |  ⬆ {:.1} KB/s",
-                                        sample.net_rx_kbps, sample.net_tx_kbps
-                                    ))
-                                    .strong(),
+                                ui.heading(
+                                    RichText::new(format!("{:.1}%", gpu0.overall_pct))
+                                        .color(if is_light { Color32::from_rgb(180, 0, 140) } else { Color32::from_rgb(255, 100, 200) }),
                                 );
                             });
                         });
 
-                        ui.add_space(6.0);
-                        let rx_pts: PlotPoints = self
+                        ui.add(egui::ProgressBar::new((gpu0.overall_pct / 100.0).clamp(0.0, 1.0)).desired_width(ui.available_width()).animate(true));
+
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("🕹️ 3D: {:.1}%", gpu0.engine_3d_pct)).size(10.0));
+                            ui.separator();
+                            ui.label(RichText::new(format!("🧠 AI: {:.1}%", gpu0.engine_compute_pct)).size(10.0));
+                            ui.separator();
+                            ui.label(RichText::new(format!("🌡️ {:.1}°C", gpu0.temp_c)).strong().size(10.0));
+                            ui.separator();
+                            ui.label(RichText::new(format!("VRAM: {:.1}/{:.1} GB", gpu0.vram_used_gb, gpu0.vram_total_gb)).size(10.0));
+                        });
+
+                        let gpu0_rem_h = (ui.available_height() - 6.0).max(60.0);
+                        let gpu0_pts: PlotPoints = self
                             .history
                             .iter()
                             .filter(|s| s.timestamp_sec >= start_window_sec)
-                            .map(|s| [s.timestamp_sec, s.net_rx_kbps as f64])
-                            .collect();
-                        let tx_pts: PlotPoints = self
-                            .history
-                            .iter()
-                            .filter(|s| s.timestamp_sec >= start_window_sec)
-                            .map(|s| [s.timestamp_sec, s.net_tx_kbps as f64])
+                            .map(|s| {
+                                let g_val = s.gpus.first().map(|g| g.overall_pct as f64).unwrap_or(0.0);
+                                [s.timestamp_sec, g_val]
+                            })
                             .collect();
 
-                        Plot::new("net_plot")
-                            .height(140.0)
+                        Plot::new("gpu0_plot")
+                            .height(gpu0_rem_h)
+                            .width(ui.available_width())
+                            .include_y(0.0)
+                            .include_y(100.0)
                             .include_x(start_window_sec)
                             .include_x(now_sec)
                             .allow_drag(false)
                             .allow_scroll(false)
                             .show(ui, |plot_ui| {
-                                plot_ui.line(Line::new(rx_pts).color(if is_light { Color32::from_rgb(0, 160, 60) } else { Color32::LIGHT_GREEN }).name("Rx Download"));
-                                plot_ui.line(Line::new(tx_pts).color(if is_light { Color32::from_rgb(0, 110, 210) } else { Color32::LIGHT_BLUE }).name("Tx Upload"));
+                                plot_ui.line(Line::new(gpu0_pts).color(if is_light { Color32::from_rgb(180, 0, 140) } else { Color32::from_rgb(255, 100, 200) }).width(1.8));
                             });
                     });
-            });
+            }
 
-            ui.add_space(12.0);
+            // Card 4: GPU 1
+            if let Some(gpu1) = sample.gpus.get(1) {
+                egui::Frame::group(cols[1].style())
+                    .fill(card_bg)
+                    .stroke(Stroke::new(1.0, card_border))
+                    .rounding(Rounding::same(6.0))
+                    .inner_margin(Margin::same(10.0))
+                    .show(&mut cols[1], |ui| {
+                        ui.set_height(uniform_card_h - 20.0);
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.heading(format!("🎮 GPU 1: {}", gpu1.name));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.heading(
+                                    RichText::new(format!("{:.1}%", gpu1.overall_pct))
+                                        .color(if is_light { Color32::from_rgb(0, 150, 160) } else { Color32::from_rgb(0, 220, 255) }),
+                                );
+                            });
+                        });
+
+                        ui.add(egui::ProgressBar::new((gpu1.overall_pct / 100.0).clamp(0.0, 1.0)).desired_width(ui.available_width()).animate(true));
+
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(format!("🕹️ 3D: {:.1}%", gpu1.engine_3d_pct)).size(10.0));
+                            ui.separator();
+                            ui.label(RichText::new(format!("🧠 AI: {:.1}%", gpu1.engine_compute_pct)).size(10.0));
+                            ui.separator();
+                            ui.label(RichText::new(format!("🌡️ {:.1}°C", gpu1.temp_c)).strong().size(10.0));
+                            ui.separator();
+                            ui.label(RichText::new(format!("VRAM: {:.1}/{:.1} GB", gpu1.vram_used_gb, gpu1.vram_total_gb)).size(10.0));
+                        });
+
+                        let gpu1_rem_h = (ui.available_height() - 6.0).max(60.0);
+                        let gpu1_pts: PlotPoints = self
+                            .history
+                            .iter()
+                            .filter(|s| s.timestamp_sec >= start_window_sec)
+                            .map(|s| {
+                                let g_val = s.gpus.get(1).map(|g| g.overall_pct as f64).unwrap_or(0.0);
+                                [s.timestamp_sec, g_val]
+                            })
+                            .collect();
+
+                        Plot::new("gpu1_plot")
+                            .height(gpu1_rem_h)
+                            .width(ui.available_width())
+                            .include_y(0.0)
+                            .include_y(100.0)
+                            .include_x(start_window_sec)
+                            .include_x(now_sec)
+                            .allow_drag(false)
+                            .allow_scroll(false)
+                            .show(ui, |plot_ui| {
+                                plot_ui.line(Line::new(gpu1_pts).color(if is_light { Color32::from_rgb(0, 150, 160) } else { Color32::from_rgb(0, 220, 255) }).width(1.8));
+                            });
+                    });
+            }
+        });
+
+        ui.add_space(8.0);
+
+        // ROW 3: Storage (Card 5) & Network (Card 6)
+        ui.columns(2, |cols| {
+            cols[0].set_height(uniform_card_h);
+            cols[0].set_max_height(uniform_card_h);
+            cols[1].set_height(uniform_card_h);
+            cols[1].set_max_height(uniform_card_h);
+
+            // Card 5: Storage Drives & I/O Rate
+            egui::Frame::group(cols[0].style())
+                .fill(card_bg)
+                .stroke(Stroke::new(1.0, card_border))
+                .rounding(Rounding::same(6.0))
+                .inner_margin(Margin::same(10.0))
+                .show(&mut cols[0], |ui| {
+                    ui.set_height(uniform_card_h - 20.0);
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.heading("💾 Storage Drives & I/O Rate");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!("R: {:.0} KB/s | W: {:.0} KB/s", sample.disk_read_kbps, sample.disk_write_kbps)).strong(),
+                            );
+                        });
+                    });
+
+                    for disk in &sample.disks {
+                        ui.label(
+                            RichText::new(format!("Drive {}: {:.1}/{:.1} GB ({:.0}%)", disk.mount_point, disk.used_gb, disk.total_gb, disk.usage_pct)).size(10.5),
+                        );
+                        ui.add(egui::ProgressBar::new((disk.usage_pct / 100.0).clamp(0.0, 1.0)).desired_width(ui.available_width()));
+                    }
+
+                    let disk_rem_h = (ui.available_height() - 6.0).max(60.0);
+                    let read_pts: PlotPoints = self
+                        .history
+                        .iter()
+                        .filter(|s| s.timestamp_sec >= start_window_sec)
+                        .map(|s| [s.timestamp_sec, s.disk_read_kbps as f64])
+                        .collect();
+
+                    Plot::new("disk_plot")
+                        .height(disk_rem_h)
+                        .width(ui.available_width())
+                        .include_x(start_window_sec)
+                        .include_x(now_sec)
+                        .allow_drag(false)
+                        .allow_scroll(false)
+                        .show(ui, |plot_ui| {
+                            plot_ui.line(Line::new(read_pts).color(if is_light { Color32::from_rgb(210, 130, 0) } else { Color32::GOLD }).width(1.8));
+                        });
+                });
+
+            // Card 6: Network Bandwidth
+            egui::Frame::group(cols[1].style())
+                .fill(card_bg)
+                .stroke(Stroke::new(1.0, card_border))
+                .rounding(Rounding::same(6.0))
+                .inner_margin(Margin::same(10.0))
+                .show(&mut cols[1], |ui| {
+                    ui.set_height(uniform_card_h - 20.0);
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        ui.heading("🌐 Network Bandwidth");
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                RichText::new(format!("⬇ {:.1} KB/s | ⬆ {:.1} KB/s", sample.net_rx_kbps, sample.net_tx_kbps)).strong(),
+                            );
+                        });
+                    });
+
+                    let net_rem_h = (ui.available_height() - 6.0).max(60.0);
+                    let rx_pts: PlotPoints = self
+                        .history
+                        .iter()
+                        .filter(|s| s.timestamp_sec >= start_window_sec)
+                        .map(|s| [s.timestamp_sec, s.net_rx_kbps as f64])
+                        .collect();
+                    let tx_pts: PlotPoints = self
+                        .history
+                        .iter()
+                        .filter(|s| s.timestamp_sec >= start_window_sec)
+                        .map(|s| [s.timestamp_sec, s.net_tx_kbps as f64])
+                        .collect();
+
+                    Plot::new("net_plot")
+                        .height(net_rem_h)
+                        .width(ui.available_width())
+                        .include_x(start_window_sec)
+                        .include_x(now_sec)
+                        .allow_drag(false)
+                        .allow_scroll(false)
+                        .show(ui, |plot_ui| {
+                            plot_ui.line(Line::new(rx_pts).color(if is_light { Color32::from_rgb(0, 160, 60) } else { Color32::LIGHT_GREEN }).name("Rx Download"));
+                            plot_ui.line(Line::new(tx_pts).color(if is_light { Color32::from_rgb(0, 110, 210) } else { Color32::LIGHT_BLUE }).name("Tx Upload"));
+                        });
+                });
         });
     }
 
@@ -1222,7 +1394,7 @@ impl PerfmonApp {
             None => return,
         };
 
-        let is_light = self.theme == ThemeMode::CleanLight;
+        let is_light = matches!(self.theme, ThemeMode::CleanLight | ThemeMode::Win11TaskMgrLight);
 
         ui.add_space(8.0);
         ui.heading("📊 System Hardware & Telemetry Grid");
