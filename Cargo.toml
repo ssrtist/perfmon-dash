@@ -11,3 +11,7 @@ egui_plot = "0.29"
 sysinfo = "0.31"
 chrono = "0.4"
 crossbeam-channel = "0.5"
+
+[build-dependencies]
+winres = "0.1"
+

@@ -1540,11 +1540,19 @@ impl eframe::App for PerfmonApp {
 }
 
 fn main() -> eframe::Result<()> {
+    let icon_data = eframe::icon_data::from_png_bytes(include_bytes!("../icon.png")).ok();
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("perfmon-dash - System Telemetry")
+        .with_inner_size([1160.0, 780.0])
+        .with_min_inner_size([800.0, 500.0]);
+
+    if let Some(icon) = icon_data {
+        viewport = viewport.with_icon(icon);
+    }
+
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("perfmon-dash - System Telemetry")
-            .with_inner_size([1160.0, 780.0])
-            .with_min_inner_size([800.0, 500.0]),
+        viewport,
         ..Default::default()
     };
 
@@ -1554,3 +1562,4 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| Ok(Box::new(PerfmonApp::new(cc)))),
     )
 }
+
